@@ -214,7 +214,7 @@ func newServer(logger *zap.Logger, coordinatorURL string, memberURLs []string, s
 	}
 
 	go watchMux.Run(context.Background())
-	return NewServer(coordinator, members), nil
+	return NewServer(coordinator, members, zap.NewNop()), nil
 }
 
 func collectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Event {

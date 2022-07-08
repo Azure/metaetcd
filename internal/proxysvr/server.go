@@ -11,9 +11,7 @@ import (
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/api/v3rpc/rpctypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
-	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
-	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -27,8 +25,6 @@ import (
 // TODO: Wire up compaction API and return watch events when compaction occurs
 
 // TODO: Use per-member circuit breakers to avoid orphaned clock ticks and the watch latency they cause
-
-// TODO: Better logging. The grpc middleware is too noisy.
 
 // TODO: Make sure we already return now() from member, not coordinator.
 // Otherwise, a write might fail, get returns new meta rev, then cluster is rolled back and rev decrements
@@ -46,16 +42,18 @@ type server struct {
 
 	coordinator *membership.ClientSet
 	members     *membership.Pool
+	logger      *zap.Logger
 }
 
-func NewServer(coordinator *membership.ClientSet, members *membership.Pool) Server {
+func NewServer(coordinator *membership.ClientSet, members *membership.Pool, logger *zap.Logger) Server {
 	return &server{
 		coordinator: coordinator,
 		members:     members,
+		logger:      logger,
 	}
 }
 
-func NewGRPCServer(logger *zap.Logger) *grpc.Server {
+func NewGRPCServer() *grpc.Server {
 	return grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle: time.Second * 5,
@@ -64,18 +62,12 @@ func NewGRPCServer(logger *zap.Logger) *grpc.Server {
 		}),
 		grpc.MaxRecvMsgSize(10*1024*1024),
 		grpc.MaxSendMsgSize(10*1024*1024),
-		grpc_middleware.WithUnaryServerChain(
-			grpc_ctxtags.UnaryServerInterceptor(grpc_ctxtags.WithFieldExtractor(grpc_ctxtags.CodeGenRequestFieldExtractor)),
-			grpc_zap.UnaryServerInterceptor(logger),
-		),
-		grpc_middleware.WithStreamServerChain(
-			grpc_ctxtags.StreamServerInterceptor(grpc_ctxtags.WithFieldExtractor(grpc_ctxtags.CodeGenRequestFieldExtractor)),
-			grpc_zap.StreamServerInterceptor(logger),
-		),
 	)
 }
 
 func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+	start := time.Now()
+
 	var metaRev int64
 	if req.Revision != 0 {
 		metaRev = req.Revision
@@ -92,8 +84,10 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		client, watchStatus := s.members.GetMemberForKey(string(req.Key))
 		_, err := s.rangeWithClient(ctx, req, resp, metaRev, client, watchStatus)
 		if err != nil {
+			s.logger.Warn("completed single-key range with error", zap.String("key", string(req.Key)), zap.Int64("metaRev", metaRev), zap.Duration("latency", time.Since(start)), zap.Error(err))
 			return nil, err
 		}
+		s.logger.Info("completed single-key range successfully", zap.String("key", string(req.Key)), zap.Int64("metaRev", metaRev), zap.Duration("latency", time.Since(start)))
 		return resp, nil
 	}
 
@@ -101,9 +95,10 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		return s.rangeWithClient(ctx, req, resp, metaRev, client, watchStatus)
 	})
 	if err != nil {
+		s.logger.Info("completed range with error", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)), zap.Error(err))
 		return nil, err
 	}
-
+	s.logger.Info("completed range successfully", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)))
 	return resp, nil
 }
 
@@ -140,6 +135,8 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 	wg, _ := errgroup.WithContext(srv.Context())
 	ch := make(chan *etcdserverpb.WatchResponse)
+	id := uuid.Must(uuid.NewRandom()).String()
+	s.logger.Info("starting watch connection", zap.String("watchID", id))
 
 	wg.Go(func() error {
 		for {
@@ -149,11 +146,13 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 			}
 			if r := msg.GetCreateRequest(); r != nil {
 				wg.Go(func() error {
+					s.logger.Info("adding keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
 					s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch)
 					return nil
 				})
 				ch <- &etcdserverpb.WatchResponse{WatchId: r.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
 			}
+			// TODO: Handle other types of incoming requests
 		}
 	})
 
@@ -166,7 +165,11 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 		return nil
 	})
 
-	return wg.Wait()
+	if err := wg.Wait(); err != nil {
+		s.logger.Warn("closing watch connection with error", zap.String("watchID", id), zap.Error(err))
+	}
+	s.logger.Info("closing watch connection", zap.String("watchID", id))
+	return nil
 }
 
 func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
@@ -225,10 +228,8 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 
 	resp, err := client.KV.Txn(ctx, req)
 	if err != nil {
+		s.logger.Error("error sending tx", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Error(err))
 		return nil, err
-	}
-	if !resp.Succeeded {
-		// TODO: Add metric for transactions that fail after the meta clock has been incremented
 	}
 	for _, r := range resp.Responses {
 		if p := r.GetResponsePut(); p != nil {
@@ -246,6 +247,11 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		}
 	}
 	resp.Header = &etcdserverpb.ResponseHeader{Revision: metaRev}
+	if resp.Succeeded {
+		s.logger.Info("tx applied successfully", zap.String("key", string(key)), zap.Int64("metaRev", metaRev))
+	} else {
+		s.logger.Error("tx failed", zap.String("key", string(key)), zap.Int64("metaRev", metaRev))
+	}
 	return resp, nil
 }
 
@@ -277,6 +283,8 @@ func (s *server) now(ctx context.Context) (int64, error) {
 func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, error) {
 	// TODO: Take a lock in the coordinator before starting this process to reduce possible thundering herd
 
+	s.logger.Error("clock was lost - reconstituting from member clusters")
+
 	var latestMetaRev int64
 	s.members.IterateMembers(func(client *membership.ClientSet, _ *watch.Status) (bool, error) {
 		r, err := client.ClientV3.KV.Get(ctx, scheme.MetaKey)
@@ -302,6 +310,7 @@ func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, err
 		return 0, err
 	}
 
+	s.logger.Info("reconstituted meta cluster logic clock", zap.Int64("metaRev", latestMetaRev))
 	return latestMetaRev, nil
 }
 
@@ -348,6 +357,7 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 	if err != nil {
 		return nil, err
 	}
+	s.logger.Info("granted lease successfully", zap.Int64("id", req.ID), zap.Duration("ttl", time.Duration(req.TTL)*time.Second))
 	return &etcdserverpb.LeaseGrantResponse{
 		Header: &etcdserverpb.ResponseHeader{},
 		ID:     req.ID,

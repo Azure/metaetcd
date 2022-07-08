@@ -22,7 +22,7 @@ func NewMux(logger *zap.Logger, gapTimeout time.Duration) *Mux {
 	bcast := newBroadcast()
 	m := &Mux{
 		logger: logger,
-		buffer: newBuffer(gapTimeout, 200, bcast),
+		buffer: newBuffer(gapTimeout, 200, bcast, logger), // TODO: Allow buffer length to be set as flag
 		bcast:  bcast,
 	}
 	return m
@@ -38,7 +38,7 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Status{
-		MetaToMemberMap: newMapRing(1000),
+		MetaToMemberMap: newMapRing(1000, m.logger),
 		cancel:          cancel,
 		done:            make(chan struct{}),
 	}
@@ -59,8 +59,9 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 	return s, nil
 }
 
+// TODO: Move this business logic to the scheme package
 func (m *Mux) watchLoop(metaToMemberMap *mapRing, w clientv3.WatchChan) {
-	memberToMetaMap := newMapRing(200)
+	memberToMetaMap := newMapRing(200, m.logger)
 	for msg := range w {
 		for _, event := range msg.Events {
 			if string(event.Kv.Key) == scheme.MetaKey {

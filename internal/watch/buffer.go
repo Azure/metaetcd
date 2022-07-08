@@ -9,6 +9,7 @@ import (
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
+	"go.uber.org/zap"
 )
 
 // TODO: Return error for attempts to start watch connection before the oldest message in the buffer
@@ -20,20 +21,21 @@ type buffer struct {
 	upperBound int64
 	deferral   *deferralQueue
 	bcast      *broadcast
+	logger     *zap.Logger
 }
 
-func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast) *buffer {
-	return &buffer{list: list.New(), maxLen: maxLen, deferral: newDeferralQueue(gapTimeout), bcast: bcast}
+func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast, logger *zap.Logger) *buffer {
+	return &buffer{list: list.New(), maxLen: maxLen, deferral: newDeferralQueue(gapTimeout), bcast: bcast, logger: logger}
 }
 
 func (b *buffer) Run(ctx context.Context) {
 	go b.deferral.Run(ctx)
 	for val := range b.deferral.Chan {
-		b.RaiseUpperBound(val)
+		b.raiseUpperBound(val)
 	}
 }
 
-func (b *buffer) RaiseUpperBound(val int64) {
+func (b *buffer) raiseUpperBound(val int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 	if b.upperBound < val {
@@ -137,8 +139,10 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 	return
 }
 
-func (b *buffer) bridgeGapUnlocked() bool {
+func (b *buffer) bridgeGapUnlocked() (ok bool) {
 	// TODO: Keep pointer to oldest rev before gap to avoid scanning the entire buffer
+	upperBoundAtStart := b.upperBound
+	ok = true
 	val := b.list.Front() // oldest to newest
 	for {
 		if val == nil {
@@ -156,7 +160,12 @@ func (b *buffer) bridgeGapUnlocked() bool {
 			val = val.Next()
 			continue
 		}
-		return false
+		ok = false
+		break
 	}
-	return true
+
+	if b.upperBound > upperBoundAtStart+1 {
+		b.logger.Info("closed gap in watch events", zap.Int64("startRev", upperBoundAtStart), zap.Int64("endRev", b.upperBound))
+	}
+	return ok
 }

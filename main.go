@@ -83,8 +83,8 @@ func main() {
 
 	go watchMux.Run(context.Background())
 
-	grpcServer := proxysvr.NewGRPCServer(logger)
-	svr := proxysvr.NewServer(coordClient, pool)
+	grpcServer := proxysvr.NewGRPCServer()
+	svr := proxysvr.NewServer(coordClient, pool, logger)
 	etcdserverpb.RegisterKVServer(grpcServer, svr)
 	etcdserverpb.RegisterWatchServer(grpcServer, svr)
 	etcdserverpb.RegisterLeaseServer(grpcServer, svr)

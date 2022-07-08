@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 )
 
 func TestMapRing(t *testing.T) {
-	m := newMapRing(3)
+	m := newMapRing(3, zap.NewNop())
 	m.Push(10, 20)
 	m.Push(11, 21)
 	m.Push(12, 22)
@@ -30,10 +31,13 @@ func TestMapRing(t *testing.T) {
 	val, ok = m.Get(13)
 	assert.True(t, ok)
 	assert.Equal(t, int64(23), val)
+
+	max := m.latestKey()
+	assert.Equal(t, int64(13), max)
 }
 
 func TestMapRingWaiting(t *testing.T) {
-	m := newMapRing(2)
+	m := newMapRing(2, zap.NewNop())
 
 	t.Run("future value", func(t *testing.T) {
 		done := make(chan struct{})

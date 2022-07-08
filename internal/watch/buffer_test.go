@@ -9,13 +9,14 @@ import (
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/Azure/metaetcd/internal/testutil"
 )
 
 func TestBufferOrdering(t *testing.T) {
 	bcast := newBroadcast()
-	b := newBuffer(time.Millisecond*10, 4, bcast)
+	b := newBuffer(time.Millisecond*10, 4, bcast, zap.NewNop())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -84,7 +85,7 @@ func TestBufferOrdering(t *testing.T) {
 }
 
 func TestBufferKeyFiltering(t *testing.T) {
-	b := newBuffer(time.Millisecond*10, 10, newBroadcast())
+	b := newBuffer(time.Millisecond*10, 10, newBroadcast(), zap.NewNop())
 
 	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 1,
@@ -109,7 +110,7 @@ func TestBufferKeyFiltering(t *testing.T) {
 }
 
 func TestBufferBridgeGap(t *testing.T) {
-	b := newBuffer(time.Second, 10, newBroadcast())
+	b := newBuffer(time.Second, 10, newBroadcast(), zap.NewNop())
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}
