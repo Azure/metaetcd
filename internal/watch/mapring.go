@@ -72,5 +72,9 @@ func (r *mapRing) WaitGet(ctx context.Context, key int64, timeout time.Duration)
 func (r *mapRing) latestKey() int64 {
 	r.mut.Lock()
 	defer r.mut.Unlock()
-	return r.key[(r.pointer-1)%r.len]
+	i := (r.pointer - 1) % r.len
+	if i < 0 {
+		return 0
+	}
+	return r.key[i]
 }
