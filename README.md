@@ -1,14 +1,43 @@
-# Project
+# Meta Etcd
 
-> This repo has been populated by an initial template to help get you started. Please
-> make sure to update the content to build a great experience for community-building.
+> Project status: proof of concept - do not use unless you want an adventure!
 
-As the maintainer of this project, please make a few updates:
+A proxy that enables sharding Kubernetes apiserver's keyspace across multiple etcd clusters.
 
-- Improving this README.MD file to provide a great experience
-- Updating SUPPORT.MD with content about this project's support experience
-- Understanding the security reporting process in SECURITY.MD
-- Remove this section from the README
+## Why?
+
+Etcd is typically disk IO constrained. Meaning that more/faster disks are required to scale past a certain point. If you don't have access to faster disks, the only answer is more of them. If you can't physically attach more storage to the host, the only answer is to add more hosts. But etcd is a single Raft consensus group in which every node in the cluster eventually receives every write operation. So adding more hosts doesn't increase throughput.
+
+In order to balance etcd-associated disk IO across multiple hosts we need a "meta cluster" that is partitioned across multiple "member clusters".
+
+Beyond scaling bottlenecks, partitioning is still useful - particularly for systems that colocate multiple etcd clusters on the same hardware. Sharding disk IO across more nodes naturally reduces the risk of noisy neighbors and allows nodes to run "hot" safely.
+
+## Caveats
+
+- 8 bytes of overhead per value stored
+- Transactions can only reference a single key
+- Create revision is not retained
+- Raft cluster state is not returned in response headers
+- Failed writes might increase watch latency
+- Multi-key range queries fan out to all clusters
+- Leases are only partially supported
+
+## Repartitioning
+
+Currently the proxy does not support repartitioning, although it is implemented such that it is possible in the future. The long term goal is to support dynamically adding/removing member clusters at runtime with little to no impact.
+
+## Architecture
+
+### Clocking
+
+In order to maintain a logic clock for the entire meta cluster, the proxy requires an additional "coordinator" cluster. A counter is incremented on this cluster for every write. The meta cluster's clock is also stored in one of the member clusters during transactions.
+
+Since at least one member cluster always has the latest timestamp, the coordinator cluster doesn't need to be durable — it can use tmpfs. So it is unlikely to become a scaling bottleneck. If the coordinator cluster state is lost, the proxy will reconstitute it from the member clusters.
+
+### Watches
+
+The proxy watches the entire keyspace of every member cluster, buffers n messages, and replays them to clients. It's possible that messages will be received out of order, since network latency may vary between member clusters. In this case, it will buffer the out of order message until a timeout window is exceeded or the previous message has been received.
+
 
 ## Contributing
 
