@@ -63,13 +63,20 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 func (m *Mux) watchLoop(metaToMemberMap *mapRing, w clientv3.WatchChan) {
 	memberToMetaMap := newMapRing(200, m.logger)
 	for msg := range w {
+		var meta int64 = -1
 		for _, event := range msg.Events {
 			if string(event.Kv.Key) == scheme.MetaKey {
-				meta := scheme.MetaRevFromMetaKey(event.Kv.Value)
+				meta = scheme.MetaRevFromMetaKey(event.Kv.Value)
+				event.Kv.ModRevision = meta
 				memberToMetaMap.Push(msg.Header.Revision, meta)
 				metaToMemberMap.Push(meta, msg.Header.Revision)
+				break
 			}
 		}
+		if meta == -1 {
+			continue // not a metaetcd event
+		}
+		m.logger.Info("observed watch event", zap.Int64("metaRev", meta))
 
 		for _, event := range msg.Events {
 			if event.PrevKv != nil && len(event.PrevKv.Value) >= 8 {
