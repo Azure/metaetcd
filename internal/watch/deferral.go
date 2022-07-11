@@ -43,25 +43,35 @@ func (d *deferralQueue) Run(ctx context.Context) {
 		select {
 		case <-d.timerResets:
 		case <-d.timer.C:
-			el := d.list.Back()
-			if el == nil {
-				continue // should be impossible
-			}
-			val := el.Value.(*deferredValue)
-			d.Chan <- val.Val
-			d.list.Remove(el)
+			func() {
+				d.mut.Lock()
+				defer d.mut.Unlock()
+
+				el := d.list.Back()
+				if el == nil {
+					return // should be impossible
+				}
+				val := el.Value.(*deferredValue)
+				d.Chan <- val.Val
+				d.list.Remove(el)
+			}()
 		case <-ctx.Done():
 			return
 		}
 
-		// Set timer for next item
-		el := d.list.Back()
-		if el == nil {
-			continue // no more items in the list
-		}
-		val := el.Value.(*deferredValue)
-		d.timer.Stop()
-		d.timer.Reset(d.latency - time.Since(val.PushTime))
+		func() {
+			d.mut.Lock()
+			defer d.mut.Unlock()
+
+			// Set timer for next item
+			el := d.list.Back()
+			if el == nil {
+				return // no more items in the list
+			}
+			val := el.Value.(*deferredValue)
+			d.timer.Stop()
+			d.timer.Reset(d.latency - time.Since(val.PushTime))
+		}()
 	}
 }
 
