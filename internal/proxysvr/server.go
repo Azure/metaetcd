@@ -93,6 +93,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		return resp, nil
 	}
 
+	// TODO: Concurrency?
 	err := s.members.IterateMembers(func(client *membership.ClientSet, watchStatus *watch.Status) (bool, error) {
 		return s.rangeWithClient(ctx, req, resp, metaRev, client, watchStatus)
 	})
@@ -123,10 +124,10 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 			resp.Count += 1
 			scheme.ResolveModRev(kv)
 		}
+		resp.Kvs = append(resp.Kvs, r.Kvs...)
 	}
 
-	resp.Kvs = append(resp.Kvs, r.Kvs...)
-	return req.Limit == 0 || len(resp.Kvs) < int(req.Limit), nil
+	return req.Limit == 0 || !r.More || len(resp.Kvs) > int(req.Limit), nil
 }
 
 func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
@@ -328,7 +329,7 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 		}
 
 		lastMetaRev := int64(binary.LittleEndian.Uint64(resp.Kvs[0].Value))
-		if lastMetaRev >= metaRev {
+		if lastMetaRev > metaRev {
 			zeroKeyRev = resp.Kvs[0].ModRevision - 1
 			continue
 		}

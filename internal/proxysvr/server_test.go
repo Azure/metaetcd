@@ -70,7 +70,7 @@ func TestIntegrationBulk(t *testing.T) {
 
 			getResp, err := client.Get(ctx, key)
 			require.NoError(t, err)
-			require.Len(t, getResp.Kvs, 1, "a single KV response is expected")
+			require.Len(t, getResp.Kvs, 1, "a single KV response is expected for key %s", key)
 			assert.Equal(t, key, string(getResp.Kvs[0].Key), "key matches")
 			assert.Equal(t, value, string(getResp.Kvs[0].Value), "value matches")
 			assert.Equal(t, creationRevs[key], getResp.Kvs[0].ModRevision, "mod rev matches meta cluster rev at the time the key was last written")
