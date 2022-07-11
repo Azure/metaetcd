@@ -29,6 +29,8 @@ import (
 // TODO: Make sure we already return now() from member, not coordinator.
 // Otherwise, a write might fail, get returns new meta rev, then cluster is rolled back and rev decrements
 
+// TODO: Cleanup map ring cache that we don't use anymore
+
 type Server interface {
 	etcdserverpb.KVServer
 	etcdserverpb.WatchServer
@@ -103,16 +105,11 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 }
 
 func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet, watchStatus *watch.Status) (bool, error) {
-	memberRev, ok := watchStatus.MetaToMemberMap.WaitGet(ctx, metaRev, time.Millisecond*200) // TODO: Allow cache timeout window to be set in flag
-	if ok {
-		req.Revision = memberRev
-	} else {
-		memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
-		if err != nil {
-			return false, err
-		}
-		req.Revision = memberRev
+	memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
+	if err != nil {
+		return false, err
 	}
+	req.Revision = memberRev
 
 	r, err := client.KV.Range(ctx, req)
 	if err != nil {
@@ -336,6 +333,7 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 			continue
 		}
 
+		// Member rev guaranteed to be greater than or equal to the corresponding meta rev
 		return resp.Kvs[0].ModRevision, nil
 	}
 }
