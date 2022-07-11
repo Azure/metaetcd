@@ -38,10 +38,14 @@ func (b *buffer) Run(ctx context.Context) {
 func (b *buffer) raiseUpperBound(val int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
-	if b.upperBound < val {
-		b.upperBound = val
-		b.bcast.Send()
+	if b.upperBound >= val {
+		return
 	}
+	b.logger.Error("closing watch gap after timeout", zap.Int64("currentRev", b.upperBound), zap.Int64("newRev", val))
+
+	b.upperBound = val
+	b.bridgeGapUnlocked()
+	b.bcast.Send()
 }
 
 func (b *buffer) Push(events []*clientv3.Event) {
@@ -141,7 +145,6 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 
 func (b *buffer) bridgeGapUnlocked() (ok bool) {
 	// TODO: Keep pointer to oldest rev before gap to avoid scanning the entire buffer
-	upperBoundAtStart := b.upperBound
 	ok = true
 	val := b.list.Front() // oldest to newest
 	for {
@@ -162,10 +165,6 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 		}
 		ok = false
 		break
-	}
-
-	if b.upperBound > upperBoundAtStart+1 {
-		b.logger.Info("closed gap in watch events", zap.Int64("startRev", upperBoundAtStart), zap.Int64("endRev", b.upperBound))
 	}
 	return ok
 }
