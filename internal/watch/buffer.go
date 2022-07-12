@@ -34,11 +34,11 @@ func (b *buffer) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker.C:
 			b.bridgeGapUnlocked()
 			b.bcast.Send() // TODO: Only on change
-		case <-ctx.Done():
-			return
 		}
 	}
 }
