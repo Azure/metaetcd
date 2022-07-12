@@ -30,6 +30,7 @@ func main() {
 		caPath            string
 		watchTimeout      time.Duration
 		pprofPort         int
+		watchBufferLen    int
 	)
 	flag.StringVar(&coordinator, "coordinator", "", "")
 	flag.StringVar(&membersStr, "members", "", "")
@@ -37,6 +38,7 @@ func main() {
 	flag.StringVar(&clientCertKeyPath, "client-cert-key", "", "")
 	flag.StringVar(&caPath, "ca-cert", "", "")
 	flag.DurationVar(&watchTimeout, "watch-timeout", time.Second*10, "")
+	flag.IntVar(&watchBufferLen, "watch-buffer-len", 3000, "")
 	zap.LevelFlag("v", zap.WarnLevel, "log level (default is warn)")
 	flag.IntVar(&pprofPort, "pprof-port", 0, "port to serve pprof on. disabled if 0")
 	flag.Parse()
@@ -71,7 +73,7 @@ func main() {
 		logger.Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
 	}
 
-	watchMux := watch.NewMux(logger, watchTimeout)
+	watchMux := watch.NewMux(logger, watchTimeout, watchBufferLen)
 	pool := membership.NewPool(scc, watchMux)
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {

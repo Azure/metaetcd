@@ -18,11 +18,11 @@ type Mux struct {
 	bcast  *broadcast
 }
 
-func NewMux(logger *zap.Logger, gapTimeout time.Duration) *Mux {
+func NewMux(logger *zap.Logger, gapTimeout time.Duration, bufferLen int) *Mux {
 	bcast := newBroadcast()
 	m := &Mux{
 		logger: logger,
-		buffer: newBuffer(gapTimeout, 200, bcast, logger), // TODO: Allow buffer length to be set as flag
+		buffer: newBuffer(gapTimeout, bufferLen, bcast, logger),
 		bcast:  bcast,
 	}
 	return m

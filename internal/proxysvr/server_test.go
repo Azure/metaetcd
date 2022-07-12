@@ -203,7 +203,7 @@ func newServer(logger *zap.Logger, coordinatorURL string, memberURLs []string, s
 		return nil, fmt.Errorf("initializing coordinator client: %w", err)
 	}
 
-	watchMux := watch.NewMux(logger, time.Second*10)
+	watchMux := watch.NewMux(logger, time.Second*10, 200)
 	members := membership.NewPool(scc, watchMux)
 
 	partitions := membership.NewStaticPartitions(len(memberURLs))
