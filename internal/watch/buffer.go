@@ -1,7 +1,6 @@
 package watch
 
 import (
-	"bytes"
 	"container/list"
 	"context"
 	"sync"
@@ -9,6 +8,7 @@ import (
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
+	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
 )
 
@@ -63,7 +63,7 @@ func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
 
 func (b *buffer) pushUnlocked(event *mvccpb.Event) bool {
 	lastEl := b.list.Back()
-	wrapped := &eventWrapper{Event: event, Timestamp: time.Now()}
+	wrapped := &eventWrapper{Event: event, Timestamp: time.Now(), Key: adt.NewStringAffinePoint(string(event.Kv.Key))}
 
 	// Case 1: first element
 	if lastEl == nil {
@@ -111,10 +111,12 @@ func (b *buffer) trimUnlocked() {
 	b.list.Remove(b.list.Front())
 }
 
-func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n int, rev int64) {
+func (b *buffer) Range(start int64, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, rev int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 	val := b.list.Front()
+
+	// TODO: Somewhere, hold a pointer to current position instead of scanning for start rev every time
 
 	for {
 		if val == nil {
@@ -125,10 +127,7 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
-		// TODO: https://github.com/etcd-io/etcd/blob/6c5dfcf140319d7815e0a303aefc0f45cc49dd0b/server/storage/mvcc/watcher_group.go#L186
-		if e.Kv.ModRevision > start &&
-			bytes.Compare(e.Kv.Key, key) >= 0 &&
-			(len(end) == 0 || bytes.Compare(e.Kv.Key, end) < 0) {
+		if e.Kv.ModRevision > start && ivl.Intersects(e.Key) {
 			n++
 			slice = append(slice, e.Event)
 			rev = e.Kv.ModRevision
@@ -176,5 +175,6 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 
 type eventWrapper struct {
 	*mvccpb.Event
+	Key       adt.Interval
 	Timestamp time.Time
 }

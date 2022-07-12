@@ -7,6 +7,7 @@ import (
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
 
 	"github.com/Azure/metaetcd/internal/scheme"
@@ -111,11 +112,15 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 
 	broadcast <- struct{}{}
 
+	// TODO: Consider one tree per incoming watch connection (like etcd does)
+	tree := adt.NewIntervalTree()
+	tree.Insert(adt.NewStringAffineInterval(string(key), string(end)), nil)
+
 	var startingRev int64
 	var n int
 	for range broadcast {
 		resp := &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}}
-		resp.Events, n, resp.Header.Revision = m.buffer.Range(startingRev, key, end)
+		resp.Events, n, resp.Header.Revision = m.buffer.Range(startingRev, tree)
 		if n > 0 {
 			ch <- resp
 			startingRev = resp.Header.Revision
