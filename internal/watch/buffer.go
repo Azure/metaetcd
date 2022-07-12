@@ -17,35 +17,29 @@ import (
 type buffer struct {
 	mut        sync.Mutex
 	list       *list.List
+	gapTimeout time.Duration
 	maxLen     int
 	upperBound int64
-	deferral   *deferralQueue
 	bcast      *broadcast
 	logger     *zap.Logger
 }
 
 func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast, logger *zap.Logger) *buffer {
-	return &buffer{list: list.New(), maxLen: maxLen, deferral: newDeferralQueue(gapTimeout), bcast: bcast, logger: logger}
+	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast, logger: logger}
 }
 
 func (b *buffer) Run(ctx context.Context) {
-	go b.deferral.Run(ctx)
-	for val := range b.deferral.Chan {
-		b.raiseUpperBound(val)
+	ticker := time.NewTicker(b.gapTimeout)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			b.bridgeGapUnlocked()
+			b.bcast.Send() // TODO: Only on change
+		case <-ctx.Done():
+			return
+		}
 	}
-}
-
-func (b *buffer) raiseUpperBound(val int64) {
-	b.mut.Lock()
-	defer b.mut.Unlock()
-	if b.upperBound >= val {
-		return
-	}
-	b.logger.Error("closing watch gap after timeout", zap.Int64("currentRev", b.upperBound), zap.Int64("newRev", val))
-
-	b.upperBound = val
-	b.bridgeGapUnlocked()
-	b.bcast.Send()
 }
 
 func (b *buffer) Push(events []*clientv3.Event) {
@@ -62,32 +56,31 @@ func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
 	b.trimUnlocked()
 	if ok {
 		b.bcast.Send()
-	} else {
-		b.deferral.Defer(event.Kv.ModRevision)
 	}
 	return ok
 }
 
 func (b *buffer) pushUnlocked(event *mvccpb.Event) bool {
 	lastEl := b.list.Back()
+	wrapped := &eventWrapper{Event: event, Timestamp: time.Now()}
 
 	// Case 1: first element
 	if lastEl == nil {
-		b.list.PushFront(event)
+		b.list.PushFront(wrapped)
 		return b.bridgeGapUnlocked()
 	}
 
 	// Case 2: outside of range - insert before or after
-	last := lastEl.Value.(*mvccpb.Event)
+	last := lastEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision > last.Kv.ModRevision {
-		b.list.PushBack(event)
+		b.list.PushBack(wrapped)
 		return b.bridgeGapUnlocked()
 	}
 
 	firstEl := b.list.Front()
-	first := firstEl.Value.(*mvccpb.Event)
+	first := firstEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision < first.Kv.ModRevision {
-		b.list.PushFront(event)
+		b.list.PushFront(wrapped)
 		return b.bridgeGapUnlocked()
 	}
 
@@ -97,10 +90,10 @@ func (b *buffer) pushUnlocked(event *mvccpb.Event) bool {
 		if firstEl == nil {
 			break
 		}
-		first = firstEl.Value.(*mvccpb.Event)
+		first = firstEl.Value.(*eventWrapper)
 
 		if event.Kv.ModRevision > first.Kv.ModRevision {
-			b.list.InsertAfter(event, firstEl)
+			b.list.InsertAfter(wrapped, firstEl)
 			return b.bridgeGapUnlocked()
 		}
 		lastEl = firstEl
@@ -126,7 +119,7 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 			break
 		}
 
-		e := val.Value.(*mvccpb.Event)
+		e := val.Value.(*eventWrapper)
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
@@ -134,7 +127,7 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 			bytes.Compare(e.Kv.Key, key) >= 0 &&
 			(len(end) == 0 || bytes.Compare(e.Kv.Key, end) < 0) {
 			n++
-			slice = append(slice, e)
+			slice = append(slice, e.Event)
 			rev = e.Kv.ModRevision
 		}
 		next := val.Next()
@@ -151,7 +144,7 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 		if val == nil {
 			break
 		}
-		valE := val.Value.(*mvccpb.Event)
+		valE := val.Value.(*eventWrapper)
 
 		if valE.Kv.ModRevision <= b.upperBound {
 			val = val.Next()
@@ -163,8 +156,21 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 			val = val.Next()
 			continue
 		}
+
+		if time.Since(valE.Timestamp) > b.gapTimeout {
+			b.logger.Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
+			b.upperBound = valE.Kv.ModRevision
+			val = val.Next()
+			continue
+		}
+
 		ok = false
 		break
 	}
 	return ok
+}
+
+type eventWrapper struct {
+	*mvccpb.Event
+	Timestamp time.Time
 }
