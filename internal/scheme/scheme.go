@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 )
@@ -118,4 +119,61 @@ func ResolveModRev(kv *mvccpb.KeyValue) {
 	kv.ModRevision = int64(binary.LittleEndian.Uint64(buf))
 	kv.CreateRevision = 0
 	kv.Value = kv.Value[:len(kv.Value)-8]
+}
+
+func PreflightTxn(metaRev int64, req *etcdserverpb.TxnRequest, current *clientv3.GetResponse) (int64, *etcdserverpb.TxnResponse) {
+	modMetaRev := MetaRevFromValue(current.Kvs[0].Value)
+	if modMetaRev == metaRev {
+		return current.Kvs[0].ModRevision, nil
+	}
+
+	returnVal := &etcdserverpb.TxnResponse{Header: &etcdserverpb.ResponseHeader{}}
+	for _, kv := range current.Kvs {
+		ResolveModRev(kv)
+	}
+
+	for _, op := range req.Failure {
+		if r := op.GetRequest(); r != nil {
+			returnVal.Responses = append(returnVal.Responses, &etcdserverpb.ResponseOp{
+				Response: &etcdserverpb.ResponseOp_ResponseRange{
+					ResponseRange: &etcdserverpb.RangeResponse{
+						Header: &etcdserverpb.ResponseHeader{},
+						Kvs:    current.Kvs,
+					},
+				},
+			})
+		}
+	}
+	return modMetaRev, returnVal
+}
+
+func FindMetaEvent(events []*clientv3.Event) (int64, bool) {
+	for _, event := range events {
+		if string(event.Kv.Key) == MetaKey {
+			meta := MetaRevFromMetaKey(event.Kv.Value)
+			event.Kv.ModRevision = meta
+			return meta, true
+		}
+	}
+	return 0, false
+}
+
+func TransformEvents(meta int64, events []*clientv3.Event) {
+	for _, event := range events {
+		if event.PrevKv != nil && len(event.PrevKv.Value) >= 8 {
+			event.PrevKv.ModRevision = MetaRevFromValue(event.PrevKv.Value)
+			event.PrevKv.Value = event.PrevKv.Value[:len(event.PrevKv.Value)-8]
+		}
+		if event.Type == clientv3.EventTypeDelete {
+			event.Kv.ModRevision = meta
+			continue
+		}
+
+		isCreate := event.Kv.CreateRevision == event.Kv.ModRevision
+		event.Kv.ModRevision = MetaRevFromValue(event.Kv.Value)
+		if isCreate {
+			event.Kv.CreateRevision = event.Kv.ModRevision
+		}
+		event.Kv.Value = event.Kv.Value[:len(event.Kv.Value)-8]
+	}
 }

@@ -54,45 +54,17 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 		}
 	}()
 
-	// TODO: Block until caches have been warmed
-
 	return s, nil
 }
 
-// TODO: Move this business logic to the scheme package
 func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	for msg := range w {
-		var meta int64 = -1
-		for _, event := range msg.Events {
-			if string(event.Kv.Key) == scheme.MetaKey {
-				meta = scheme.MetaRevFromMetaKey(event.Kv.Value)
-				event.Kv.ModRevision = meta
-				break
-			}
-		}
-		if meta == -1 {
+		meta, ok := scheme.FindMetaEvent(msg.Events)
+		if !ok {
 			continue // not a metaetcd event
 		}
 		m.logger.Info("observed watch event", zap.Int64("metaRev", meta))
-
-		for _, event := range msg.Events {
-			if event.PrevKv != nil && len(event.PrevKv.Value) >= 8 {
-				event.PrevKv.ModRevision = scheme.MetaRevFromValue(event.PrevKv.Value)
-				event.PrevKv.Value = event.PrevKv.Value[:len(event.PrevKv.Value)-8]
-			}
-			if event.Type == clientv3.EventTypeDelete {
-				event.Kv.ModRevision = meta
-				continue
-			}
-
-			isCreate := event.Kv.CreateRevision == event.Kv.ModRevision
-			event.Kv.ModRevision = scheme.MetaRevFromValue(event.Kv.Value)
-			if isCreate {
-				event.Kv.CreateRevision = event.Kv.ModRevision
-			}
-			event.Kv.Value = event.Kv.Value[:len(event.Kv.Value)-8]
-		}
-
+		scheme.TransformEvents(meta, msg.Events)
 		m.buffer.Push(msg.Events)
 	}
 }

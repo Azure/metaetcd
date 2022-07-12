@@ -364,37 +364,19 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 	}, nil
 }
 
-// TODO: Refactor to move protocol-ish logic to scheme package
 func (s *server) resolveModComparison(ctx context.Context, client *membership.ClientSet, key []byte, metaRev int64, req *etcdserverpb.TxnRequest) (int64, *etcdserverpb.TxnResponse, error) {
 	resp, err := client.ClientV3.Get(ctx, string(key))
 	if err != nil {
 		return 0, nil, err
 	}
-
 	if len(resp.Kvs) == 0 {
 		return 0, nil, nil
 	}
 
-	modMetaRev := scheme.MetaRevFromValue(resp.Kvs[0].Value)
-	if modMetaRev != metaRev {
-		returnVal := &etcdserverpb.TxnResponse{Header: &etcdserverpb.ResponseHeader{}}
-		for _, kv := range resp.Kvs {
-			scheme.ResolveModRev(kv)
-		}
-		for _, op := range req.Failure {
-			if r := op.GetRequest(); r != nil {
-				returnVal.Responses = append(returnVal.Responses, &etcdserverpb.ResponseOp{
-					Response: &etcdserverpb.ResponseOp_ResponseRange{
-						ResponseRange: &etcdserverpb.RangeResponse{
-							Header: &etcdserverpb.ResponseHeader{},
-							Kvs:    resp.Kvs,
-						},
-					},
-				})
-			}
-		}
+	modMetaRev, failureResp := scheme.PreflightTxn(metaRev, req, resp)
+	if failureResp != nil {
 		s.logger.Error("tx failed pre-check", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64("actualModMetaRev", modMetaRev))
-		return 0, returnVal, nil
+		return 0, failureResp, nil
 	}
 
 	return resp.Kvs[0].ModRevision, nil, nil
