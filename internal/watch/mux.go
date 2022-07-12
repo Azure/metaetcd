@@ -14,16 +14,14 @@ import (
 )
 
 type Mux struct {
-	logger *zap.Logger
 	buffer *buffer
 	bcast  *broadcast
 }
 
-func NewMux(logger *zap.Logger, gapTimeout time.Duration, bufferLen int) *Mux {
+func NewMux(gapTimeout time.Duration, bufferLen int) *Mux {
 	bcast := newBroadcast()
 	m := &Mux{
-		logger: logger,
-		buffer: newBuffer(gapTimeout, bufferLen, bcast, logger),
+		buffer: newBuffer(gapTimeout, bufferLen, bcast),
 		bcast:  bcast,
 	}
 	return m
@@ -50,7 +48,7 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 		close(s.done)
 		m.watchLoop(w)
 		if ctx.Err() == nil {
-			m.logger.Sugar().Panicf("watch of client with endpoints '%+s' closed unexpectedly", client.Endpoints())
+			zap.L().Sugar().Panicf("watch of client with endpoints '%+s' closed unexpectedly", client.Endpoints())
 		}
 	}()
 
@@ -63,7 +61,7 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 		if !ok {
 			continue // not a metaetcd event
 		}
-		m.logger.Info("observed watch event", zap.Int64("metaRev", meta))
+		zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
 		scheme.TransformEvents(meta, msg.Events)
 		m.buffer.Push(msg.Events)
 	}

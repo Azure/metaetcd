@@ -56,20 +56,15 @@ func main() {
 
 	rand.Seed(time.Now().Unix())
 
-	logger, err := zap.NewProduction()
-	if err != nil {
-		panic(err)
-	}
-
 	members := strings.Split(membersStr, ",")
 
 	lis, err := net.Listen("tcp", "localhost:2379")
 	if err != nil {
-		logger.Sugar().Panicf("failed to start listener: %s", err)
+		zap.L().Sugar().Panicf("failed to start listener: %s", err)
 	}
 
 	if err := scc.LoadPKI(clientCertPath, clientCertKeyPath, caPath); err != nil {
-		logger.Sugar().Panicf("failed to load shared client context: %s", err)
+		zap.L().Sugar().Panicf("failed to load shared client context: %s", err)
 	}
 
 	if pprofPort > 0 {
@@ -80,16 +75,16 @@ func main() {
 
 	coordClient, err := membership.InitCoordinator(&scc, coordinator)
 	if err != nil {
-		logger.Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
+		zap.L().Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
 	}
 
-	watchMux := watch.NewMux(logger, watchTimeout, watchBufferLen)
+	watchMux := watch.NewMux(watchTimeout, watchBufferLen)
 	pool := membership.NewPool(&scc, watchMux)
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {
 		err = pool.AddMember(membership.ClientID(i), memberURL, partitions[i])
 		if err != nil {
-			logger.Sugar().Panicf("failed to add member %q to the pool: %s", memberURL, err)
+			zap.L().Sugar().Panicf("failed to add member %q to the pool: %s", memberURL, err)
 		}
 	}
 
@@ -98,7 +93,7 @@ func main() {
 	signal.Notify(shutdownSig, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		<-shutdownSig
-		logger.Warn("gracefully shutting down...")
+		zap.L().Warn("gracefully shutting down...")
 		grpcServer.GracefulStop()
 	}()
 
@@ -108,19 +103,19 @@ func main() {
 	go func() {
 		defer wg.Add(-1)
 		watchMux.Run(ctx)
-		logger.Warn("watch mux gracefully shutdown")
+		zap.L().Warn("watch mux gracefully shutdown")
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Add(-1)
-		svr := proxysvr.NewServer(coordClient, pool, logger)
+		svr := proxysvr.NewServer(coordClient, pool)
 		etcdserverpb.RegisterKVServer(grpcServer, svr)
 		etcdserverpb.RegisterWatchServer(grpcServer, svr)
 		etcdserverpb.RegisterLeaseServer(grpcServer, svr)
-		logger.Info("initialized - ready to proxy requests")
+		zap.L().Info("initialized - ready to proxy requests")
 		grpcServer.Serve(lis)
-		logger.Warn("grpc server gracefully shut down")
+		zap.L().Warn("grpc server gracefully shut down")
 		cancel() // now we can safely stop the watch mux
 	}()
 

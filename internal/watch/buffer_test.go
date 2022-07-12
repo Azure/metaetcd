@@ -10,14 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/pkg/v3/adt"
-	"go.uber.org/zap"
 
 	"github.com/Azure/metaetcd/internal/testutil"
 )
 
 func TestBufferOrdering(t *testing.T) {
 	bcast := newBroadcast()
-	b := newBuffer(time.Millisecond*10, 4, bcast, zap.NewNop())
+	b := newBuffer(time.Millisecond*10, 4, bcast)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -25,7 +24,6 @@ func TestBufferOrdering(t *testing.T) {
 	ch := make(chan struct{}, 1)
 	bcast.Watch(ch)
 
-	// TODO: Helper for this - many tests do the same thing
 	done := make(chan struct{})
 	go func() {
 		b.Run(ctx)
@@ -86,7 +84,7 @@ func TestBufferOrdering(t *testing.T) {
 }
 
 func TestBufferKeyFiltering(t *testing.T) {
-	b := newBuffer(time.Millisecond*10, 10, newBroadcast(), zap.NewNop())
+	b := newBuffer(time.Millisecond*10, 10, newBroadcast())
 
 	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 1,
@@ -111,7 +109,7 @@ func TestBufferKeyFiltering(t *testing.T) {
 }
 
 func TestBufferBridgeGap(t *testing.T) {
-	b := newBuffer(time.Second, 10, newBroadcast(), zap.NewNop())
+	b := newBuffer(time.Second, 10, newBroadcast())
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}

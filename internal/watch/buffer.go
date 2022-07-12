@@ -21,12 +21,11 @@ type buffer struct {
 	maxLen     int
 	upperBound int64
 	bcast      *broadcast
-	logger     *zap.Logger
 	upperVal   *list.Element
 }
 
-func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast, logger *zap.Logger) *buffer {
-	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast, logger: logger}
+func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast) *buffer {
+	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast}
 }
 
 func (b *buffer) Run(ctx context.Context) {
@@ -162,7 +161,7 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 		isNextEvent := valE.Kv.ModRevision == b.upperBound+1
 		hasTimedout := time.Since(valE.Timestamp) > b.gapTimeout
 		if hasTimedout && !isNextEvent {
-			b.logger.Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
+			zap.L().Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
 		}
 		if isNextEvent || hasTimedout {
 			b.upperBound = valE.Kv.ModRevision
