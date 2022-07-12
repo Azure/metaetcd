@@ -14,8 +14,6 @@ import (
 
 // TODO: Return error for attempts to start watch connection before the oldest message in the buffer
 
-// TODO: Some rounding to avoid frequent timer ticks
-
 type buffer struct {
 	mut        sync.Mutex
 	list       *list.List
@@ -39,8 +37,10 @@ func (b *buffer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.bridgeGapUnlocked()
-			b.bcast.Send() // TODO: Only on change
+			_, ok := b.bridgeGapUnlocked()
+			if ok {
+				b.bcast.Send()
+			}
 		}
 	}
 }
@@ -55,7 +55,8 @@ func (b *buffer) Push(events []*clientv3.Event) {
 }
 
 func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
-	ok := b.pushUnlocked(event)
+	b.pushUnlocked(event)
+	ok, _ := b.bridgeGapUnlocked()
 	b.trimUnlocked()
 	if ok {
 		b.bcast.Send()
@@ -63,28 +64,28 @@ func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
 	return ok
 }
 
-func (b *buffer) pushUnlocked(event *mvccpb.Event) bool {
+func (b *buffer) pushUnlocked(event *mvccpb.Event) {
 	lastEl := b.list.Back()
 	wrapped := &eventWrapper{Event: event, Timestamp: time.Now(), Key: adt.NewStringAffinePoint(string(event.Kv.Key))}
 
 	// Case 1: first element
 	if lastEl == nil {
 		b.list.PushFront(wrapped)
-		return b.bridgeGapUnlocked()
+		return
 	}
 
 	// Case 2: outside of range - insert before or after
 	last := lastEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision > last.Kv.ModRevision {
 		b.list.PushBack(wrapped)
-		return b.bridgeGapUnlocked()
+		return
 	}
 
 	firstEl := b.list.Front()
 	first := firstEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision < first.Kv.ModRevision {
 		b.list.PushFront(wrapped)
-		return b.bridgeGapUnlocked()
+		return
 	}
 
 	// Case 3: find place between pairs of events
@@ -97,12 +98,10 @@ func (b *buffer) pushUnlocked(event *mvccpb.Event) bool {
 
 		if event.Kv.ModRevision > first.Kv.ModRevision {
 			b.list.InsertAfter(wrapped, firstEl)
-			return b.bridgeGapUnlocked()
+			return
 		}
 		lastEl = firstEl
 	}
-
-	return b.bridgeGapUnlocked()
 }
 
 func (b *buffer) trimUnlocked() {
@@ -143,7 +142,7 @@ func (b *buffer) Range(start int64, ivl adt.IntervalTree) (slice []*mvccpb.Event
 	return
 }
 
-func (b *buffer) bridgeGapUnlocked() (ok bool) {
+func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 	ok = true
 	val := b.upperVal
 	if val == nil {
@@ -168,6 +167,7 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 		if isNextEvent || hasTimedout {
 			b.upperBound = valE.Kv.ModRevision
 			b.upperVal = val
+			changed = true
 			val = val.Next()
 			continue
 		}
@@ -175,7 +175,7 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 		ok = false
 		break
 	}
-	return ok
+	return ok, changed
 }
 
 type eventWrapper struct {
