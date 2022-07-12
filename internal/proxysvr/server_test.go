@@ -161,6 +161,7 @@ func TestIntegrationBulk(t *testing.T) {
 			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", lastSeenMetaRev-10)).
 			Then(clientv3.OpPut("key-1", "new-value-3")).Commit()
 		require.NoError(t, err)
+		assert.False(t, txnResp.Succeeded)
 		lastSeenMetaRev = txnResp.Header.Revision
 
 		resp, err := client.Get(ctx, "key-1")

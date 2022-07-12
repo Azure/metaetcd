@@ -194,7 +194,7 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		if r.ModRevision == 0 {
 			continue
 		}
-		memberRev, resp, err := resolveModComparison(ctx, client, key, r.ModRevision, req)
+		memberRev, resp, err := s.resolveModComparison(ctx, client, key, r.ModRevision, req)
 		if err != nil {
 			return nil, err
 		}
@@ -248,7 +248,11 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 	if resp.Succeeded {
 		s.logger.Info("tx applied successfully", zap.String("key", string(key)), zap.Int64("metaRev", metaRev))
 	} else {
-		s.logger.Error("tx failed", zap.String("key", string(key)), zap.Int64("metaRev", metaRev))
+		revs := make([]int64, len(req.Compare))
+		for i, cmp := range req.Compare {
+			revs[i] = cmp.GetModRevision()
+		}
+		s.logger.Error("tx failed", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64s("cmpModRevs", revs))
 	}
 	return resp, nil
 }
@@ -365,7 +369,7 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 }
 
 // TODO: Refactor to move protocol-ish logic to scheme package
-func resolveModComparison(ctx context.Context, client *membership.ClientSet, key []byte, metaRev int64, req *etcdserverpb.TxnRequest) (int64, *etcdserverpb.TxnResponse, error) {
+func (s *server) resolveModComparison(ctx context.Context, client *membership.ClientSet, key []byte, metaRev int64, req *etcdserverpb.TxnRequest) (int64, *etcdserverpb.TxnResponse, error) {
 	resp, err := client.ClientV3.Get(ctx, string(key))
 	if err != nil {
 		return 0, nil, err
@@ -393,6 +397,7 @@ func resolveModComparison(ctx context.Context, client *membership.ClientSet, key
 				})
 			}
 		}
+		s.logger.Error("tx failed pre-check", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64("actualModMetaRev", modMetaRev))
 		return 0, returnVal, nil
 	}
 
