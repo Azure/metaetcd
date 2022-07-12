@@ -312,7 +312,9 @@ func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, err
 
 func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, metaRev int64) (int64, error) {
 	var zeroKeyRev int64
+	i := 0
 	for {
+		i++
 		var opts []clientv3.OpOption
 		if zeroKeyRev > 0 {
 			opts = append(opts, clientv3.WithRev(zeroKeyRev))
@@ -332,6 +334,7 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 			continue
 		}
 
+		s.logger.Info("resolved member rev", zap.Int("attempts", i))
 		return resp.Kvs[0].ModRevision, nil
 	}
 }
