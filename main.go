@@ -8,7 +8,11 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
@@ -18,8 +22,6 @@ import (
 	"github.com/Azure/metaetcd/internal/proxysvr"
 	"github.com/Azure/metaetcd/internal/watch"
 )
-
-// TODO: Graceful shutdown
 
 func main() {
 	var (
@@ -83,13 +85,34 @@ func main() {
 		}
 	}
 
-	go watchMux.Run(context.Background())
-
+	ctx, cancel := context.WithCancel(context.Background())
 	grpcServer := proxysvr.NewGRPCServer()
-	svr := proxysvr.NewServer(coordClient, pool, logger)
-	etcdserverpb.RegisterKVServer(grpcServer, svr)
-	etcdserverpb.RegisterWatchServer(grpcServer, svr)
-	etcdserverpb.RegisterLeaseServer(grpcServer, svr)
-	logger.Info("initialized - ready to proxy requests")
-	grpcServer.Serve(lis)
+
+	shutdownSig := make(chan os.Signal, 1)
+	signal.Notify(shutdownSig, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	go func() {
+		<-shutdownSig
+		grpcServer.GracefulStop()
+		cancel()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Add(-1)
+		watchMux.Run(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Add(-1)
+		svr := proxysvr.NewServer(coordClient, pool, logger)
+		etcdserverpb.RegisterKVServer(grpcServer, svr)
+		etcdserverpb.RegisterWatchServer(grpcServer, svr)
+		etcdserverpb.RegisterLeaseServer(grpcServer, svr)
+		logger.Info("initialized - ready to proxy requests")
+		grpcServer.Serve(lis)
+	}()
+
+	wg.Wait()
 }
