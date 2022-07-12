@@ -39,9 +39,8 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Status{
-		MetaToMemberMap: newMapRing(1000, m.logger),
-		cancel:          cancel,
-		done:            make(chan struct{}),
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 
 	startRev := resp.Header.Revision + 1
@@ -49,7 +48,7 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 	w := client.Watch(ctx, "", clientv3.WithPrefix(), clientv3.WithRev(startRev), clientv3.WithPrevKV())
 	go func() {
 		close(s.done)
-		m.watchLoop(s.MetaToMemberMap, w)
+		m.watchLoop(w)
 		if ctx.Err() == nil {
 			m.logger.Sugar().Panicf("watch of client with endpoints '%+s' closed unexpectedly", client.Endpoints())
 		}
@@ -61,16 +60,13 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 }
 
 // TODO: Move this business logic to the scheme package
-func (m *Mux) watchLoop(metaToMemberMap *mapRing, w clientv3.WatchChan) {
-	memberToMetaMap := newMapRing(200, m.logger)
+func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	for msg := range w {
 		var meta int64 = -1
 		for _, event := range msg.Events {
 			if string(event.Kv.Key) == scheme.MetaKey {
 				meta = scheme.MetaRevFromMetaKey(event.Kv.Value)
 				event.Kv.ModRevision = meta
-				memberToMetaMap.Push(msg.Header.Revision, meta)
-				metaToMemberMap.Push(meta, msg.Header.Revision)
 				break
 			}
 		}
@@ -84,9 +80,8 @@ func (m *Mux) watchLoop(metaToMemberMap *mapRing, w clientv3.WatchChan) {
 				event.PrevKv.ModRevision = scheme.MetaRevFromValue(event.PrevKv.Value)
 				event.PrevKv.Value = event.PrevKv.Value[:len(event.PrevKv.Value)-8]
 			}
-
 			if event.Type == clientv3.EventTypeDelete {
-				event.Kv.ModRevision, _ = memberToMetaMap.Get(event.Kv.ModRevision)
+				event.Kv.ModRevision = meta
 				continue
 			}
 
@@ -129,9 +124,8 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 }
 
 type Status struct {
-	MetaToMemberMap *mapRing
-	cancel          context.CancelFunc
-	done            chan struct{}
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func (s *Status) Close() {

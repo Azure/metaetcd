@@ -18,24 +18,19 @@ type ClientID int64
 type Pool struct {
 	WatchMux *watch.Mux
 
-	mut                      sync.RWMutex
-	clients                  []*ClientSet
-	watchStatus              []*watch.Status
-	clientsByClientID        map[ClientID]*ClientSet
-	watchStatusByClientID    map[ClientID]*watch.Status
-	clientsByPartitionID     map[PartitionID]*ClientSet
-	watchStatusByPartitionID map[PartitionID]*watch.Status
-	scc                      *SharedClientContext
+	mut                  sync.RWMutex
+	clients              []*ClientSet
+	clientsByClientID    map[ClientID]*ClientSet
+	clientsByPartitionID map[PartitionID]*ClientSet
+	scc                  *SharedClientContext
 }
 
 func NewPool(scc *SharedClientContext, WatchMux *watch.Mux) *Pool {
 	return &Pool{
-		clientsByPartitionID:     make(map[PartitionID]*ClientSet),
-		clientsByClientID:        make(map[ClientID]*ClientSet),
-		watchStatusByClientID:    make(map[ClientID]*watch.Status),
-		watchStatusByPartitionID: make(map[PartitionID]*watch.Status),
-		scc:                      scc,
-		WatchMux:                 WatchMux,
+		clientsByClientID:    make(map[ClientID]*ClientSet),
+		clientsByPartitionID: make(map[PartitionID]*ClientSet),
+		scc:                  scc,
+		WatchMux:             WatchMux,
 	}
 }
 
@@ -45,40 +40,35 @@ func (p *Pool) AddMember(id ClientID, endpointURL string, partitions []Partition
 		return fmt.Errorf("constructing clientset: %w", err)
 	}
 
-	watchStatus, err := p.WatchMux.StartWatch(clientset.ClientV3)
+	clientset.WatchStatus, err = p.WatchMux.StartWatch(clientset.ClientV3)
 	if err != nil {
 		return fmt.Errorf("starting watch connection: %w", err)
 	}
-
-	// TODO: Is this a race?
 
 	p.mut.Lock()
 	defer p.mut.Unlock()
 
 	p.clients = append(p.clients, clientset)
-	p.watchStatus = append(p.watchStatus, watchStatus)
 	p.clientsByClientID[id] = clientset
-	p.watchStatusByClientID[id] = watchStatus
 	for _, pid := range partitions {
 		p.clientsByPartitionID[pid] = clientset
-		p.watchStatusByPartitionID[pid] = watchStatus
 	}
 
 	return nil
 }
 
-func (p *Pool) IterateMembers(fn func(*ClientSet, *watch.Status) (bool, error)) error {
+func (p *Pool) IterateMembers(fn func(*ClientSet) (bool, error)) error {
 	p.mut.RLock()
 	defer p.mut.RUnlock()
-	for i, cs := range p.clients {
-		if ok, err := fn(cs, p.watchStatus[i]); !ok || err != nil {
+	for _, cs := range p.clients {
+		if ok, err := fn(cs); !ok || err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (p *Pool) GetMemberForKey(key string) (*ClientSet, *watch.Status) {
+func (p *Pool) GetMemberForKey(key string) *ClientSet {
 	// TODO: Return nil if no clients (only matters once clients can be registered at runtime)
 
 	h := fnv.New64()
@@ -102,7 +92,7 @@ func (p *Pool) GetMemberForKey(key string) (*ClientSet, *watch.Status) {
 	if !ok {
 		panic(fmt.Sprintf("client not found for partition ID %d", b)) // unlikely
 	}
-	return client, p.watchStatusByPartitionID[PartitionID(b)]
+	return client
 }
 
 func NewStaticPartitions(memberCount int) [][]PartitionID {

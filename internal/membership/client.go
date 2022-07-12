@@ -17,13 +17,15 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/Azure/metaetcd/internal/scheme"
+	"github.com/Azure/metaetcd/internal/watch"
 )
 
 type ClientSet struct {
-	ClientV3 *clientv3.Client
-	KV       etcdserverpb.KVClient
-	Lease    etcdserverpb.LeaseClient
-	GRPC     *grpc.ClientConn
+	ClientV3    *clientv3.Client
+	KV          etcdserverpb.KVClient
+	Lease       etcdserverpb.LeaseClient
+	GRPC        *grpc.ClientConn
+	WatchStatus *watch.Status
 }
 
 func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, error) {

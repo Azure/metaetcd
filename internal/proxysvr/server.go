@@ -19,17 +19,11 @@ import (
 
 	"github.com/Azure/metaetcd/internal/membership"
 	"github.com/Azure/metaetcd/internal/scheme"
-	"github.com/Azure/metaetcd/internal/watch"
 )
 
 // TODO: Wire up compaction API and return watch events when compaction occurs
 
 // TODO: Use per-member circuit breakers to avoid orphaned clock ticks and the watch latency they cause
-
-// TODO: Make sure we already return now() from member, not coordinator.
-// Otherwise, a write might fail, get returns new meta rev, then cluster is rolled back and rev decrements
-
-// TODO: Cleanup map ring cache that we don't use anymore
 
 type Server interface {
 	etcdserverpb.KVServer
@@ -83,8 +77,8 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 
 	resp := &etcdserverpb.RangeResponse{Header: &etcdserverpb.ResponseHeader{Revision: metaRev}}
 	if len(req.RangeEnd) == 0 {
-		client, watchStatus := s.members.GetMemberForKey(string(req.Key))
-		_, err := s.rangeWithClient(ctx, req, resp, metaRev, client, watchStatus)
+		client := s.members.GetMemberForKey(string(req.Key))
+		_, err := s.rangeWithClient(ctx, req, resp, metaRev, client)
 		if err != nil {
 			s.logger.Warn("completed single-key range with error", zap.String("key", string(req.Key)), zap.Int64("metaRev", metaRev), zap.Duration("latency", time.Since(start)), zap.Error(err))
 			return nil, err
@@ -94,8 +88,8 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	}
 
 	// TODO: Concurrency?
-	err := s.members.IterateMembers(func(client *membership.ClientSet, watchStatus *watch.Status) (bool, error) {
-		return s.rangeWithClient(ctx, req, resp, metaRev, client, watchStatus)
+	err := s.members.IterateMembers(func(client *membership.ClientSet) (bool, error) {
+		return s.rangeWithClient(ctx, req, resp, metaRev, client)
 	})
 	if err != nil {
 		s.logger.Info("completed range with error", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)), zap.Error(err))
@@ -105,7 +99,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	return resp, nil
 }
 
-func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet, watchStatus *watch.Status) (bool, error) {
+func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet) (bool, error) {
 	memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
 	if err != nil {
 		return false, err
@@ -184,7 +178,7 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		return nil, err
 	}
 
-	client, _ := s.members.GetMemberForKey(string(key))
+	client := s.members.GetMemberForKey(string(key))
 	// TODO: Check if client is nil here and in other places too (only matters once clients can be added at runtime)
 	for _, op := range req.Compare {
 		r, ok := op.TargetUnion.(*etcdserverpb.Compare_ModRevision)
@@ -288,7 +282,7 @@ func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, err
 	s.logger.Error("clock was lost - reconstituting from member clusters")
 
 	var latestMetaRev int64
-	s.members.IterateMembers(func(client *membership.ClientSet, _ *watch.Status) (bool, error) {
+	s.members.IterateMembers(func(client *membership.ClientSet) (bool, error) {
 		r, err := client.ClientV3.KV.Get(ctx, scheme.MetaKey)
 		if err != nil {
 			return false, err
@@ -338,7 +332,6 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 			continue
 		}
 
-		// Member rev guaranteed to be greater than or equal to the corresponding meta rev
 		return resp.Kvs[0].ModRevision, nil
 	}
 }
@@ -347,7 +340,7 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 	if req.ID == 0 {
 		req.ID = rand.Int63()
 	}
-	err := s.members.IterateMembers(func(cs *membership.ClientSet, s *watch.Status) (bool, error) {
+	err := s.members.IterateMembers(func(cs *membership.ClientSet) (bool, error) {
 		resp, err := cs.Lease.LeaseGrant(ctx, req)
 		if err != nil {
 			return true, err
