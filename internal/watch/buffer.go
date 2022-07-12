@@ -14,6 +14,8 @@ import (
 
 // TODO: Return error for attempts to start watch connection before the oldest message in the buffer
 
+// TODO: Some rounding to avoid frequent timer ticks
+
 type buffer struct {
 	mut        sync.Mutex
 	list       *list.List
@@ -107,8 +109,11 @@ func (b *buffer) trimUnlocked() {
 	if b.list.Len() <= b.maxLen {
 		return
 	}
-	// TODO: Don't remove if after b.lastEl
-	b.list.Remove(b.list.Front())
+	front := b.list.Front()
+	if front == b.upperVal {
+		return // don't trim events until the gap has been filled
+	}
+	b.list.Remove(front)
 }
 
 func (b *buffer) Range(start int64, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, rev int64) {
