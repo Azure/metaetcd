@@ -93,19 +93,17 @@ func main() {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	grpcServer := proxysvr.NewGRPCServer(grpcSvrKeepaliveMaxIdle, grpcSvrKeepaliveInterval, grpcSvrKeepaliveTimeout)
-
 	shutdownSig := make(chan os.Signal, 1)
 	signal.Notify(shutdownSig, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		<-shutdownSig
 		logger.Warn("gracefully shutting down...")
 		grpcServer.GracefulStop()
-		cancel()
 	}()
 
 	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(context.Background())
 	wg.Add(1)
 	go func() {
 		defer wg.Add(-1)
@@ -123,6 +121,7 @@ func main() {
 		logger.Info("initialized - ready to proxy requests")
 		grpcServer.Serve(lis)
 		logger.Warn("grpc server gracefully shut down")
+		cancel() // now we can safely stop the watch mux
 	}()
 
 	wg.Wait()
