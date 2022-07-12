@@ -56,8 +56,8 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 	// TODO: Pin connections to cluster leader like clientv3 does
 	cs.GRPC, err = grpc.DialContext(ctx, u.Host,
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:    time.Second * 5,
-			Timeout: time.Second * 20, // TODO: Expose flags for these values
+			Time:    scc.GrpcKeepaliveInterval,
+			Timeout: scc.GrpcKeepaliveTimeout,
 		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32)),
 		authOption)
@@ -91,31 +91,32 @@ func InitCoordinator(scc *SharedClientContext, endpointURL string) (*ClientSet, 
 }
 
 type SharedClientContext struct {
-	TLS *tls.Config
+	GrpcKeepaliveInterval time.Duration
+	GrpcKeepaliveTimeout  time.Duration
+	TLS                   *tls.Config
 }
 
-func NewSharedClientContext(clientCert, clientKey, caCert string) (*SharedClientContext, error) {
+func (s *SharedClientContext) LoadPKI(clientCert, clientKey, caCert string) error {
 	if clientCert == "" {
-		return &SharedClientContext{}, nil
+		return nil
 	}
 	cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
 	if err != nil {
-		return nil, fmt.Errorf("loading client cert: %w", err)
+		return fmt.Errorf("loading client cert: %w", err)
 	}
 
 	cas := x509.NewCertPool()
 	caCertPem, err := os.ReadFile(caCert)
 	if err != nil {
-		return nil, fmt.Errorf("reading ca cert: %w", err)
+		return fmt.Errorf("reading ca cert: %w", err)
 	}
 	if !cas.AppendCertsFromPEM(caCertPem) {
-		return nil, fmt.Errorf("ca cert is invalid")
+		return fmt.Errorf("ca cert is invalid")
 	}
 
-	return &SharedClientContext{
-		TLS: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			RootCAs:      cas,
-		},
-	}, nil
+	s.TLS = &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      cas,
+	}
+	return nil
 }

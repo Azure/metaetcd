@@ -25,14 +25,18 @@ import (
 
 func main() {
 	var (
-		coordinator       string
-		membersStr        string
-		clientCertPath    string
-		clientCertKeyPath string
-		caPath            string
-		watchTimeout      time.Duration
-		pprofPort         int
-		watchBufferLen    int
+		coordinator              string
+		membersStr               string
+		clientCertPath           string
+		clientCertKeyPath        string
+		caPath                   string
+		watchTimeout             time.Duration
+		pprofPort                int
+		watchBufferLen           int
+		grpcSvrKeepaliveMaxIdle  time.Duration
+		grpcSvrKeepaliveInterval time.Duration
+		grpcSvrKeepaliveTimeout  time.Duration
+		scc                      membership.SharedClientContext
 	)
 	flag.StringVar(&coordinator, "coordinator", "", "")
 	flag.StringVar(&membersStr, "members", "", "")
@@ -43,6 +47,11 @@ func main() {
 	flag.IntVar(&watchBufferLen, "watch-buffer-len", 3000, "")
 	zap.LevelFlag("v", zap.WarnLevel, "log level (default is warn)")
 	flag.IntVar(&pprofPort, "pprof-port", 0, "port to serve pprof on. disabled if 0")
+	flag.DurationVar(&grpcSvrKeepaliveMaxIdle, "grpc-server-keepalive-max-idle", time.Second*5, "")
+	flag.DurationVar(&grpcSvrKeepaliveInterval, "grpc-server-keepalive-interval", time.Second*10, "")
+	flag.DurationVar(&grpcSvrKeepaliveTimeout, "grpc-server-keepalive-timeout", time.Second*20, "")
+	flag.DurationVar(&scc.GrpcKeepaliveInterval, "grpc-client-keepalive-interval", time.Second*5, "")
+	flag.DurationVar(&scc.GrpcKeepaliveTimeout, "grpc-client-keepalive-timeout", time.Second*20, "")
 	flag.Parse()
 
 	rand.Seed(time.Now().Unix())
@@ -59,8 +68,7 @@ func main() {
 		logger.Sugar().Panicf("failed to start listener: %s", err)
 	}
 
-	scc, err := membership.NewSharedClientContext(clientCertPath, clientCertKeyPath, caPath)
-	if err != nil {
+	if err := scc.LoadPKI(clientCertPath, clientCertKeyPath, caPath); err != nil {
 		logger.Sugar().Panicf("failed to load shared client context: %s", err)
 	}
 
@@ -70,13 +78,13 @@ func main() {
 		}()
 	}
 
-	coordClient, err := membership.InitCoordinator(scc, coordinator)
+	coordClient, err := membership.InitCoordinator(&scc, coordinator)
 	if err != nil {
 		logger.Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
 	}
 
 	watchMux := watch.NewMux(logger, watchTimeout, watchBufferLen)
-	pool := membership.NewPool(scc, watchMux)
+	pool := membership.NewPool(&scc, watchMux)
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {
 		err = pool.AddMember(membership.ClientID(i), memberURL, partitions[i])
@@ -86,12 +94,13 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	grpcServer := proxysvr.NewGRPCServer()
+	grpcServer := proxysvr.NewGRPCServer(grpcSvrKeepaliveMaxIdle, grpcSvrKeepaliveInterval, grpcSvrKeepaliveTimeout)
 
 	shutdownSig := make(chan os.Signal, 1)
 	signal.Notify(shutdownSig, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {
 		<-shutdownSig
+		logger.Warn("gracefully shutting down...")
 		grpcServer.GracefulStop()
 		cancel()
 	}()
@@ -101,6 +110,7 @@ func main() {
 	go func() {
 		defer wg.Add(-1)
 		watchMux.Run(ctx)
+		logger.Warn("watch mux gracefully shutdown")
 	}()
 
 	wg.Add(1)
@@ -112,6 +122,7 @@ func main() {
 		etcdserverpb.RegisterLeaseServer(grpcServer, svr)
 		logger.Info("initialized - ready to proxy requests")
 		grpcServer.Serve(lis)
+		logger.Warn("grpc server gracefully shut down")
 	}()
 
 	wg.Wait()

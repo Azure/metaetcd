@@ -55,12 +55,12 @@ func NewServer(coordinator *membership.ClientSet, members *membership.Pool, logg
 	}
 }
 
-func NewGRPCServer() *grpc.Server {
+func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
 	return grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle: time.Second * 5,
-			Time:              time.Second * 10, // TODO: Expose these values as flags
-			Timeout:           time.Second * 20,
+			MaxConnectionIdle: maxIdle,
+			Time:              interval,
+			Timeout:           timeout,
 		}),
 		grpc.MaxRecvMsgSize(10*1024*1024),
 		grpc.MaxSendMsgSize(10*1024*1024),
