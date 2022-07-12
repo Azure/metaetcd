@@ -22,6 +22,7 @@ type buffer struct {
 	upperBound int64
 	bcast      *broadcast
 	logger     *zap.Logger
+	upperVal   *list.Element
 }
 
 func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast, logger *zap.Logger) *buffer {
@@ -106,6 +107,7 @@ func (b *buffer) trimUnlocked() {
 	if b.list.Len() <= b.maxLen {
 		return
 	}
+	// TODO: Don't remove if after b.lastEl
 	b.list.Remove(b.list.Front())
 }
 
@@ -123,6 +125,7 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
+		// TODO: https://github.com/etcd-io/etcd/blob/6c5dfcf140319d7815e0a303aefc0f45cc49dd0b/server/storage/mvcc/watcher_group.go#L186
 		if e.Kv.ModRevision > start &&
 			bytes.Compare(e.Kv.Key, key) >= 0 &&
 			(len(end) == 0 || bytes.Compare(e.Kv.Key, end) < 0) {
@@ -137,9 +140,11 @@ func (b *buffer) Range(start int64, key, end []byte) (slice []*mvccpb.Event, n i
 }
 
 func (b *buffer) bridgeGapUnlocked() (ok bool) {
-	// TODO: Keep pointer to oldest rev before gap to avoid scanning the entire buffer
 	ok = true
-	val := b.list.Front() // oldest to newest
+	val := b.upperVal
+	if val == nil {
+		val = b.list.Front()
+	}
 	for {
 		if val == nil {
 			break
@@ -151,15 +156,14 @@ func (b *buffer) bridgeGapUnlocked() (ok bool) {
 			continue // this gap has already been closed
 		}
 
-		if r := valE.Kv.ModRevision; r == b.upperBound+1 {
-			b.upperBound = r
-			val = val.Next()
-			continue
-		}
-
-		if time.Since(valE.Timestamp) > b.gapTimeout {
+		isNextEvent := valE.Kv.ModRevision == b.upperBound+1
+		hasTimedout := time.Since(valE.Timestamp) > b.gapTimeout
+		if hasTimedout && !isNextEvent {
 			b.logger.Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
+		}
+		if isNextEvent || hasTimedout {
 			b.upperBound = valE.Kv.ModRevision
+			b.upperVal = val
 			val = val.Next()
 			continue
 		}
