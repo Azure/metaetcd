@@ -58,7 +58,7 @@ func TestIntegrationBulk(t *testing.T) {
 
 	t.Run("watch from rev", func(t *testing.T) {
 		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(lastSeenMetaRev-15))
-		collectEvents(t, watch, 17)
+		collectEvents(t, watch, 16)
 	})
 	cancel()
 

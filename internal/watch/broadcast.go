@@ -27,7 +27,6 @@ func (b *broadcast) Watch(ch chan<- struct{}) func() {
 		b.mut.Lock()
 		defer b.mut.Unlock()
 		b.chs[ch] = ch
-		// TODO: Close channel?
 	}()
 
 	return func() {

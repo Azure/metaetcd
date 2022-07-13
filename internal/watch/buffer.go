@@ -14,6 +14,8 @@ import (
 
 // TODO: Return error for attempts to start watch connection before the oldest message in the buffer
 
+// TODO: Consider watching only the metakey instead of maintaining event buffer for entire keyspace
+
 type buffer struct {
 	mut        sync.Mutex
 	list       *list.List
@@ -114,29 +116,51 @@ func (b *buffer) trimUnlocked() {
 	b.list.Remove(front)
 }
 
-func (b *buffer) Range(start int64, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, rev int64) {
+func (b *buffer) StartRange(start int64) *list.Element {
 	b.mut.Lock()
 	defer b.mut.Unlock()
+
 	val := b.list.Front()
+	for i := 0; true; i++ {
+		if val == nil {
+			break
+		}
+		e := val.Value.(*eventWrapper)
+		if i == 0 && e.Kv.ModRevision > start {
+			break // buffer starts after the requested start rev
+		}
+		if e.Kv.ModRevision == start {
+			return val
+		}
+		val = val.Next()
+	}
+	return nil
+}
 
-	// TODO: Somewhere, hold a pointer to current position instead of scanning for start rev every time
+func (b *buffer) Range(start *list.Element, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, pos *list.Element) {
+	b.mut.Lock()
+	defer b.mut.Unlock()
 
+	var val *list.Element
+	if start == nil {
+		val = b.list.Front()
+	} else {
+		val = start.Next()
+	}
 	for {
 		if val == nil {
 			break
 		}
-
 		e := val.Value.(*eventWrapper)
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
-		if e.Kv.ModRevision > start && ivl.Intersects(e.Key) {
+		if ivl.Intersects(e.Key) {
 			n++
 			slice = append(slice, e.Event)
-			rev = e.Kv.ModRevision
 		}
-		next := val.Next()
-		val = next
+		pos = val
+		val = val.Next()
 	}
 	return
 }
@@ -148,7 +172,7 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 		val = b.list.Front()
 	}
 	for {
-		if val == nil {
+		if val == nil || val.Value == nil {
 			break
 		}
 		valE := val.Value.(*eventWrapper)

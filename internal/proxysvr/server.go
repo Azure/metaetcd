@@ -135,6 +135,12 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 				return err
 			}
 			if r := msg.GetCreateRequest(); r != nil {
+				if r.StartRevision == 0 {
+					r.StartRevision, err = s.now(srv.Context())
+					if err != nil {
+						return err
+					}
+				}
 				wg.Go(func() error {
 					zap.L().Info("adding keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
 					s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch)

@@ -67,7 +67,7 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	}
 }
 
-func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) {
+func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) bool {
 	broadcast := make(chan struct{}, 2)
 	close := m.bcast.Watch(broadcast)
 	go func() {
@@ -81,16 +81,16 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 	tree := adt.NewIntervalTree()
 	tree.Insert(adt.NewStringAffineInterval(string(key), string(end)), nil)
 
-	var startingRev int64
+	pos := m.buffer.StartRange(rev)
 	var n int
 	for range broadcast {
 		resp := &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}}
-		resp.Events, n, resp.Header.Revision = m.buffer.Range(startingRev, tree)
+		resp.Events, n, pos = m.buffer.Range(pos, tree)
 		if n > 0 {
 			ch <- resp
-			startingRev = resp.Header.Revision
 		}
 	}
+	return true
 }
 
 type Status struct {
