@@ -60,6 +60,7 @@ func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
 }
 
 func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+	requestCount.WithLabelValues("Range").Inc()
 	start := time.Now()
 
 	var metaRev int64
@@ -123,6 +124,7 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 }
 
 func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
+	requestCount.WithLabelValues("Watch").Inc()
 	wg, _ := errgroup.WithContext(srv.Context())
 	ch := make(chan *etcdserverpb.WatchResponse)
 	id := uuid.Must(uuid.NewRandom()).String()
@@ -169,6 +171,7 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 }
 
 func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
+	requestCount.WithLabelValues("Txn").Inc()
 	key, err := scheme.ValidateTxComparisons(req.Compare)
 	if err != nil {
 		return nil, err
@@ -353,6 +356,7 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 }
 
 func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantRequest) (*etcdserverpb.LeaseGrantResponse, error) {
+	requestCount.WithLabelValues("LeaseGrant").Inc()
 	if req.ID == 0 {
 		req.ID = rand.Int63()
 	}

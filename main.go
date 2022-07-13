@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
 	"github.com/Azure/metaetcd/internal/membership"
@@ -32,6 +33,7 @@ func main() {
 		caPath                   string
 		watchTimeout             time.Duration
 		pprofPort                int
+		metricsPort              int
 		watchBufferLen           int
 		grpcSvrKeepaliveMaxIdle  time.Duration
 		grpcSvrKeepaliveInterval time.Duration
@@ -47,6 +49,7 @@ func main() {
 	flag.IntVar(&watchBufferLen, "watch-buffer-len", 3000, "")
 	zap.LevelFlag("v", zap.WarnLevel, "log level (default is warn)")
 	flag.IntVar(&pprofPort, "pprof-port", 0, "port to serve pprof on. disabled if 0")
+	flag.IntVar(&metricsPort, "metrics-port", 9090, "port to serve Prometheus metrics on. disabled if 0")
 	flag.DurationVar(&grpcSvrKeepaliveMaxIdle, "grpc-server-keepalive-max-idle", time.Second*5, "")
 	flag.DurationVar(&grpcSvrKeepaliveInterval, "grpc-server-keepalive-interval", time.Second*10, "")
 	flag.DurationVar(&grpcSvrKeepaliveTimeout, "grpc-server-keepalive-timeout", time.Second*20, "")
@@ -70,6 +73,14 @@ func main() {
 	if pprofPort > 0 {
 		go func() {
 			panic(http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", pprofPort), nil))
+		}()
+	}
+
+	if metricsPort > 0 {
+		go func() {
+			mux := http.NewServeMux()
+			mux.Handle("/metrics", promhttp.Handler())
+			panic(http.ListenAndServe(fmt.Sprintf(":%d", metricsPort), mux))
 		}()
 	}
 
