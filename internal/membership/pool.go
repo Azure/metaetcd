@@ -69,7 +69,9 @@ func (p *Pool) IterateMembers(fn func(*ClientSet) (bool, error)) error {
 }
 
 func (p *Pool) GetMemberForKey(key string) *ClientSet {
-	// TODO: Return nil if no clients (only matters once clients can be registered at runtime)
+	if len(p.clients) == 0 {
+		return nil
+	}
 
 	h := fnv.New64()
 	if _, err := io.WriteString(h, key); err != nil {
