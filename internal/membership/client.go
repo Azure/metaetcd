@@ -11,15 +11,28 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/clientv3/balancer"
+	"github.com/coreos/etcd/clientv3/balancer/picker"
 	"github.com/coreos/etcd/clientv3/concurrency"
 	"github.com/coreos/etcd/clientv3/credentials"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/Azure/metaetcd/internal/scheme"
 	"github.com/Azure/metaetcd/internal/watch"
 )
+
+const etcdRoundRobinBalancerName = "etcd-round-robin-lb"
+
+func init() {
+	balancer.RegisterBuilder(balancer.Config{
+		Policy: picker.RoundrobinBalanced,
+		Name:   etcdRoundRobinBalancerName,
+		Logger: zap.L(),
+	})
+}
 
 type ClientSet struct {
 	ClientV3    *clientv3.Client
@@ -56,8 +69,8 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 		return nil, fmt.Errorf("parsing endpoint url: %w", err)
 	}
 
-	// TODO: Pin connections to cluster leader like clientv3 does
 	cs.GRPC, err = grpc.DialContext(ctx, u.Host,
+		grpc.WithBalancerName(etcdRoundRobinBalancerName),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:    scc.GrpcKeepaliveInterval,
 			Timeout: scc.GrpcKeepaliveTimeout,
