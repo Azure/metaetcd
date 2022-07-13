@@ -174,15 +174,13 @@ func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
 	member1URL := testutil.StartEtcd(t, "MEMBER-1")
 	member2URL := testutil.StartEtcd(t, "MEMBER-2")
 
-	svr, err := newServer(coordinatoorURL, []string{member1URL, member2URL}, &membership.SharedClientContext{}, time.Second*5)
-	require.NoError(t, err)
-
 	lis, err := net.Listen("tcp", "localhost:0")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		lis.Close()
 	})
 
+	svr := newServer(t, coordinatoorURL, []string{member1URL, member2URL}, &membership.SharedClientContext{}, time.Second*5)
 	grpcServer := grpc.NewServer()
 	etcdserverpb.RegisterKVServer(grpcServer, svr)
 	etcdserverpb.RegisterWatchServer(grpcServer, svr)
@@ -196,25 +194,32 @@ func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
 	return client, svr.(*server).coordinator.ClientV3
 }
 
-func newServer(coordinatorURL string, memberURLs []string, scc *membership.SharedClientContext, watchTimeout time.Duration) (Server, error) {
+func newServer(t testing.TB, coordinatorURL string, memberURLs []string, scc *membership.SharedClientContext, watchTimeout time.Duration) Server {
 	coordinator, err := membership.InitCoordinator(scc, coordinatorURL)
-	if err != nil {
-		return nil, fmt.Errorf("initializing coordinator client: %w", err)
-	}
+	require.NoError(t, err)
 
-	watchMux := watch.NewMux(time.Second*10, 200)
+	watchMux := watch.NewMux(time.Second, 200)
 	members := membership.NewPool(scc, watchMux)
 
 	partitions := membership.NewStaticPartitions(len(memberURLs))
 	for i, memberURL := range memberURLs {
 		err = members.AddMember(membership.ClientID(i), memberURL, partitions[i])
-		if err != nil {
-			return nil, fmt.Errorf("initializing client for endpoint %q: %w", memberURL, err)
-		}
+		require.NoError(t, err)
 	}
 
-	go watchMux.Run(context.Background())
-	return NewServer(coordinator, members), nil
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchMux.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		t.Log("waiting for graceful shutdown...")
+		<-done
+		t.Log("gracefully shut down")
+	})
+	return NewServer(coordinator, members)
 }
 
 func collectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Event {
