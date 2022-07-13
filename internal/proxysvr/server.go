@@ -36,11 +36,11 @@ type server struct {
 	etcdserverpb.UnimplementedWatchServer
 	etcdserverpb.UnimplementedLeaseServer
 
-	coordinator *membership.ClientSet
+	coordinator *membership.CoordinatorClientSet
 	members     *membership.Pool
 }
 
-func NewServer(coordinator *membership.ClientSet, members *membership.Pool) Server {
+func NewServer(coordinator *membership.CoordinatorClientSet, members *membership.Pool) Server {
 	return &server{
 		coordinator: coordinator,
 		members:     members,
@@ -281,7 +281,16 @@ func (s *server) now(ctx context.Context) (int64, error) {
 }
 
 func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, error) {
-	// TODO: Take a lock in the coordinator before starting this process to reduce possible thundering herd
+	s.coordinator.ClockReconstitutionLock.Lock(ctx)
+	defer s.coordinator.ClockReconstitutionLock.Unlock(context.Background())
+
+	resp, err := s.coordinator.ClientV3.Get(ctx, scheme.MetaKey)
+	if err != nil {
+		return 0, fmt.Errorf("getting clock: %w", err)
+	}
+	if len(resp.Kvs) > 0 {
+		return scheme.ResolveMetaRev(resp.Kvs[0]), nil
+	}
 
 	zap.L().Error("clock was lost - reconstituting from member clusters")
 
@@ -305,7 +314,7 @@ func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, err
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(latestMetaRev)-1)
 
-	_, err := s.coordinator.ClientV3.KV.Put(ctx, scheme.MetaKey, string(buf))
+	_, err = s.coordinator.ClientV3.KV.Put(ctx, scheme.MetaKey, string(buf))
 	if err != nil {
 		return 0, err
 	}

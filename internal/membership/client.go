@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/clientv3/concurrency"
 	"github.com/coreos/etcd/clientv3/credentials"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"google.golang.org/grpc"
@@ -72,7 +73,12 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 	return cs, nil
 }
 
-func InitCoordinator(scc *SharedClientContext, endpointURL string) (*ClientSet, error) {
+type CoordinatorClientSet struct {
+	*ClientSet
+	ClockReconstitutionLock *concurrency.Mutex
+}
+
+func InitCoordinator(scc *SharedClientContext, endpointURL string) (*CoordinatorClientSet, error) {
 	cs, err := NewClientSet(scc, endpointURL)
 	if err != nil {
 		return nil, err
@@ -89,7 +95,16 @@ func InitCoordinator(scc *SharedClientContext, endpointURL string) (*ClientSet, 
 		return nil, fmt.Errorf("initializing clock: %w", err)
 	}
 
-	return cs, nil
+	sess, err := concurrency.NewSession(cs.ClientV3)
+	if err != nil {
+		return nil, fmt.Errorf("initializing etcd concurrency session: %w", err)
+	}
+	// TODO: sess.Close?
+
+	return &CoordinatorClientSet{
+		ClientSet:               cs,
+		ClockReconstitutionLock: concurrency.NewMutex(sess, "/locks/clock-reconstitution"),
+	}, nil
 }
 
 type SharedClientContext struct {
