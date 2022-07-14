@@ -47,7 +47,7 @@ func main() {
 	flag.StringVar(&caPath, "ca-cert", "", "")
 	flag.DurationVar(&watchTimeout, "watch-timeout", time.Second*10, "")
 	flag.IntVar(&watchBufferLen, "watch-buffer-len", 3000, "")
-	zap.LevelFlag("v", zap.WarnLevel, "log level (default is warn)")
+	logLevel := zap.LevelFlag("v", zap.WarnLevel, "log level")
 	flag.IntVar(&pprofPort, "pprof-port", 0, "port to serve pprof on. disabled if 0")
 	flag.IntVar(&metricsPort, "metrics-port", 9090, "port to serve Prometheus metrics on. disabled if 0")
 	flag.DurationVar(&grpcSvrKeepaliveMaxIdle, "grpc-server-keepalive-max-idle", time.Second*5, "")
@@ -56,6 +56,14 @@ func main() {
 	flag.DurationVar(&scc.GrpcKeepaliveInterval, "grpc-client-keepalive-interval", time.Second*5, "")
 	flag.DurationVar(&scc.GrpcKeepaliveTimeout, "grpc-client-keepalive-timeout", time.Second*20, "")
 	flag.Parse()
+
+	logCfg := zap.NewProductionConfig()
+	logCfg.Level.SetLevel(*logLevel)
+	logger, err := logCfg.Build()
+	if err != nil {
+		panic(err)
+	}
+	zap.ReplaceGlobals(logger)
 
 	rand.Seed(time.Now().Unix())
 
