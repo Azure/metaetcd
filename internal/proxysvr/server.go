@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"time"
@@ -56,8 +57,8 @@ func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
 			Time:              interval,
 			Timeout:           timeout,
 		}),
-		grpc.MaxRecvMsgSize(10*1024*1024),
-		grpc.MaxSendMsgSize(10*1024*1024),
+		grpc.MaxRecvMsgSize(math.MaxInt32),
+		grpc.MaxSendMsgSize(math.MaxInt32),
 	)
 }
 
@@ -406,7 +407,7 @@ func (s *server) resolveModComparison(ctx context.Context, client *membership.Cl
 
 	modMetaRev, failureResp := scheme.PreflightTxn(metaRev, req, resp)
 	if failureResp != nil {
-		zap.L().Error("tx failed pre-check", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64("actualModMetaRev", modMetaRev))
+		zap.L().Warn("tx failed pre-check", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64("actualModMetaRev", modMetaRev))
 		return 0, failureResp, nil
 	}
 
