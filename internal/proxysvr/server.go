@@ -364,6 +364,7 @@ func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, meta
 		}
 
 		zap.L().Info("resolved member rev", zap.Int("attempts", i))
+		getMemberRevDepth.Observe(float64(i))
 		return resp.Kvs[0].ModRevision, nil
 	}
 }
