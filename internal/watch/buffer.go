@@ -141,17 +141,16 @@ func (b *buffer) Range(start *list.Element, ivl adt.IntervalTree) (slice []*mvcc
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	var val *list.Element
 	if start == nil {
-		val = b.list.Front()
+		pos = b.list.Front()
 	} else {
-		val = start.Next()
+		pos = start.Next()
 	}
 	for {
-		if val == nil {
+		if pos == nil {
 			break
 		}
-		e := val.Value.(*eventWrapper)
+		e := pos.Value.(*eventWrapper)
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
@@ -159,8 +158,7 @@ func (b *buffer) Range(start *list.Element, ivl adt.IntervalTree) (slice []*mvcc
 			n++
 			slice = append(slice, e.Event)
 		}
-		pos = val
-		val = val.Next()
+		pos = pos.Next()
 	}
 	return
 }
