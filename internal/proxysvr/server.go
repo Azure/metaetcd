@@ -1,11 +1,13 @@
 package proxysvr
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
@@ -60,9 +62,14 @@ func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
 }
 
 func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
-	requestCount.WithLabelValues("Range").Inc()
 	start := time.Now()
+	if len(req.RangeEnd) == 0 {
+		requestCount.WithLabelValues("Get").Inc()
+	} else {
+		requestCount.WithLabelValues("Range").Inc()
+	}
 
+	limit := req.Limit
 	var metaRev int64
 	if req.Revision != 0 {
 		metaRev = req.Revision
@@ -77,8 +84,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	resp := &etcdserverpb.RangeResponse{Header: &etcdserverpb.ResponseHeader{Revision: metaRev}}
 	if len(req.RangeEnd) == 0 {
 		client := s.members.GetMemberForKey(string(req.Key))
-		_, err := s.rangeWithClient(ctx, req, resp, metaRev, client)
-		if err != nil {
+		if err := s.rangeWithClient(ctx, req, resp, metaRev, client); err != nil {
 			zap.L().Warn("completed single-key range with error", zap.String("key", string(req.Key)), zap.Int64("metaRev", metaRev), zap.Duration("latency", time.Since(start)), zap.Error(err))
 			return nil, err
 		}
@@ -88,39 +94,46 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 
 	// TODO: Concurrency?
 	err := s.members.IterateMembers(func(client *membership.ClientSet) (bool, error) {
-		return s.rangeWithClient(ctx, req, resp, metaRev, client)
+		err := s.rangeWithClient(ctx, req, resp, metaRev, client)
+		return true, err
 	})
 	if err != nil {
 		zap.L().Info("completed range with error", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)), zap.Error(err))
 		return nil, err
 	}
 	zap.L().Info("completed range successfully", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)))
+
+	sort.Slice(resp.Kvs, func(i, j int) bool { return bytes.Compare(resp.Kvs[i].Key, resp.Kvs[j].Key) > 0 })
+	if limit != 0 && int64(len(resp.Kvs)) > limit {
+		resp.Kvs = resp.Kvs[:limit]
+		resp.Count = limit
+		resp.More = true
+	}
+
 	return resp, nil
 }
 
-func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet) (bool, error) {
+func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet) error {
 	memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
 	if err != nil {
-		return false, err
+		return err
 	}
 	req.Revision = memberRev
 
 	r, err := client.KV.Range(ctx, req)
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	if req.CountOnly {
-		resp.Count += r.Count
-	} else {
+	resp.Count += r.Count
+	if !req.CountOnly {
 		for _, kv := range r.Kvs {
-			resp.Count += 1
 			scheme.ResolveModRev(kv)
 		}
 		resp.Kvs = append(resp.Kvs, r.Kvs...)
 	}
 
-	return req.Limit == 0 || !r.More || len(resp.Kvs) > int(req.Limit), nil
+	return nil
 }
 
 func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {

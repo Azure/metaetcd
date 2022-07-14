@@ -9,6 +9,7 @@ import (
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -98,6 +99,28 @@ func TestIntegrationBulk(t *testing.T) {
 		assert.Equal(t, lastSeenMetaRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 		assert.Len(t, resp.Kvs, 11)
 		assert.Equal(t, int64(11), resp.Count)
+	})
+
+	t.Run("range page over the keyspace", func(t *testing.T) {
+		var keys []*mvccpb.KeyValue
+		startKey := "key-"
+		for {
+			resp, err := client.Get(ctx, startKey, clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithLimit(9))
+			require.NoError(t, err)
+			// TODO: Assert on page length (I think it's incorrect currently)
+
+			keys = append(keys, resp.Kvs...)
+			if len(keys) >= n {
+				break
+			}
+
+			require.NotEmpty(t, resp.Kvs)
+			startKey = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
+		}
+
+		for i := 0; i < n; i++ {
+			assert.Equal(t, creationRevs[string(keys[i].Key)], keys[i].ModRevision)
+		}
 	})
 
 	t.Run("range with count", func(t *testing.T) {
