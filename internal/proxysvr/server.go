@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
@@ -85,7 +86,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	resp := &etcdserverpb.RangeResponse{Header: &etcdserverpb.ResponseHeader{Revision: metaRev}}
 	if len(req.RangeEnd) == 0 {
 		client := s.members.GetMemberForKey(string(req.Key))
-		if err := s.rangeWithClient(ctx, req, resp, metaRev, client); err != nil {
+		if err := s.rangeWithClient(ctx, req, resp, metaRev, client, nil); err != nil {
 			zap.L().Warn("completed single-key range with error", zap.String("key", string(req.Key)), zap.Int64("metaRev", metaRev), zap.Duration("latency", time.Since(start)), zap.Error(err))
 			return nil, err
 		}
@@ -93,10 +94,9 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		return resp, nil
 	}
 
-	// TODO: Concurrency?
-	err := s.members.IterateMembers(func(client *membership.ClientSet) (bool, error) {
-		err := s.rangeWithClient(ctx, req, resp, metaRev, client)
-		return true, err
+	var mut sync.Mutex
+	err := s.members.IterateMembers(ctx, func(ctx context.Context, client *membership.ClientSet) error {
+		return s.rangeWithClient(ctx, req, resp, metaRev, client, &mut)
 	})
 	if err != nil {
 		zap.L().Info("completed range with error", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)), zap.Error(err))
@@ -114,16 +114,17 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	return resp, nil
 }
 
-func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet) error {
+func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet, mut *sync.Mutex) error {
 	memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
 	if err != nil {
 		return err
 	}
-	req.Revision = memberRev
 
-	r, err := client.KV.Range(ctx, req)
+	reqCopy := *req
+	reqCopy.Revision = memberRev
+	r, err := client.KV.Range(ctx, &reqCopy)
 	if err != nil {
-		return err
+		return fmt.Errorf("ranging at member rev %d: %w", memberRev, err)
 	}
 
 	resp.Count += r.Count
@@ -131,7 +132,13 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 		for _, kv := range r.Kvs {
 			scheme.ResolveModRev(kv)
 		}
+		if mut != nil {
+			mut.Lock()
+		}
 		resp.Kvs = append(resp.Kvs, r.Kvs...)
+		if mut != nil {
+			mut.Unlock()
+		}
 	}
 
 	return nil
@@ -311,20 +318,23 @@ func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, err
 
 	zap.L().Error("clock was lost - reconstituting from member clusters")
 
+	var mut sync.Mutex
 	var latestMetaRev int64
-	s.members.IterateMembers(func(client *membership.ClientSet) (bool, error) {
+	s.members.IterateMembers(ctx, func(ctx context.Context, client *membership.ClientSet) error {
 		r, err := client.ClientV3.KV.Get(ctx, scheme.MetaKey)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if len(r.Kvs) == 0 || len(r.Kvs[0].Value) < 8 {
-			return true, nil
+			return nil
 		}
 		rev := int64(binary.LittleEndian.Uint64(r.Kvs[0].Value))
+		mut.Lock()
+		defer mut.Unlock()
 		if rev > latestMetaRev {
 			latestMetaRev = rev
 		}
-		return true, nil
+		return nil
 	})
 	latestMetaRev += delta
 
@@ -375,15 +385,15 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 	if req.ID == 0 {
 		req.ID = rand.Int63()
 	}
-	err := s.members.IterateMembers(func(cs *membership.ClientSet) (bool, error) {
+	err := s.members.IterateMembers(ctx, func(ctx context.Context, cs *membership.ClientSet) error {
 		resp, err := cs.Lease.LeaseGrant(ctx, req)
 		if err != nil {
-			return true, err
+			return err
 		}
 		if resp.Error != "" {
-			return false, fmt.Errorf("lease error: %s", resp.Error)
+			return fmt.Errorf("lease error: %s", resp.Error)
 		}
-		return true, nil
+		return nil
 	})
 	if err != nil {
 		return nil, err

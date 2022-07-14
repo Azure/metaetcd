@@ -1,12 +1,14 @@
 package membership
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"sync"
 
 	"github.com/Azure/metaetcd/internal/watch"
+	"golang.org/x/sync/errgroup"
 )
 
 const partitionCount = 16
@@ -57,15 +59,15 @@ func (p *Pool) AddMember(id ClientID, endpointURL string, partitions []Partition
 	return nil
 }
 
-func (p *Pool) IterateMembers(fn func(*ClientSet) (bool, error)) error {
+func (p *Pool) IterateMembers(ctx context.Context, fn func(context.Context, *ClientSet) error) error {
 	p.mut.RLock()
 	defer p.mut.RUnlock()
+	wg, ctx := errgroup.WithContext(ctx)
 	for _, cs := range p.clients {
-		if ok, err := fn(cs); !ok || err != nil {
-			return err
-		}
+		cs := cs
+		wg.Go(func() error { return fn(ctx, cs) })
 	}
-	return nil
+	return wg.Wait()
 }
 
 func (p *Pool) GetMemberForKey(key string) *ClientSet {
