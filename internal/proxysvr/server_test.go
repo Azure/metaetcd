@@ -190,6 +190,15 @@ func TestIntegrationBulk(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "new-value-2", string(resp.Kvs[0].Value))
 	})
+
+	t.Run("compaction", func(t *testing.T) {
+		_, err := client.Compact(ctx, lastSeenMetaRev-1)
+		require.NoError(t, err)
+
+		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")))
+		require.NoError(t, err)
+		require.Len(t, resp.Kvs, n)
+	})
 }
 
 func startServer(t testing.TB) (proxy, coord *clientv3.Client) {

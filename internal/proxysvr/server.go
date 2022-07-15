@@ -29,8 +29,6 @@ import (
 	"github.com/Azure/metaetcd/internal/scheme"
 )
 
-// TODO: Wire up compaction API and return watch events when compaction occurs
-
 // TODO: Use per-member circuit breakers to avoid orphaned clock ticks and the watch latency they cause
 
 type Server interface {
@@ -443,4 +441,24 @@ func (s *server) resolveModComparison(ctx context.Context, client *membership.Cl
 	}
 
 	return resp.Kvs[0].ModRevision, nil, nil
+}
+
+func (s *server) Compact(ctx context.Context, req *etcdserverpb.CompactionRequest) (*etcdserverpb.CompactionResponse, error) {
+	err := s.members.IterateMembers(ctx, func(ctx context.Context, cs *membership.ClientSet) (err error) {
+		reqCopy := *req
+		reqCopy.Revision, err = s.getMemberRev(ctx, cs.ClientV3, req.Revision)
+		if err != nil {
+			return err
+		}
+
+		_, err = cs.KV.Compact(ctx, &reqCopy)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: Also compact coordinator
+
+	return &etcdserverpb.CompactionResponse{}, nil
 }
