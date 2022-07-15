@@ -26,10 +26,13 @@ import (
 
 func main() {
 	var (
+		listenAddr               string
 		coordinator              string
 		membersStr               string
 		clientCertPath           string
 		clientCertKeyPath        string
+		serverCertPath           string
+		serverCertKeyPath        string
 		caPath                   string
 		watchTimeout             time.Duration
 		pprofPort                int
@@ -40,10 +43,13 @@ func main() {
 		grpcSvrKeepaliveTimeout  time.Duration
 		scc                      membership.SharedClientContext
 	)
+	flag.StringVar(&listenAddr, "listen-addr", ":2379", "")
 	flag.StringVar(&coordinator, "coordinator", "", "")
 	flag.StringVar(&membersStr, "members", "", "")
 	flag.StringVar(&clientCertPath, "client-cert", "", "")
 	flag.StringVar(&clientCertKeyPath, "client-cert-key", "", "")
+	flag.StringVar(&serverCertPath, "server-cert", "", "")
+	flag.StringVar(&serverCertKeyPath, "server-cert-key", "", "")
 	flag.StringVar(&caPath, "ca-cert", "", "")
 	flag.DurationVar(&watchTimeout, "watch-timeout", time.Second*10, "")
 	flag.IntVar(&watchBufferLen, "watch-buffer-len", 3000, "")
@@ -69,7 +75,7 @@ func main() {
 
 	members := strings.Split(membersStr, ",")
 
-	lis, err := net.Listen("tcp", "localhost:2379")
+	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		zap.L().Sugar().Panicf("failed to start listener: %s", err)
 	}
@@ -107,7 +113,11 @@ func main() {
 		}
 	}
 
-	grpcServer := proxysvr.NewGRPCServer(grpcSvrKeepaliveMaxIdle, grpcSvrKeepaliveInterval, grpcSvrKeepaliveTimeout)
+	grpcServer, err := proxysvr.NewGRPCServer(caPath, serverCertPath, serverCertKeyPath, grpcSvrKeepaliveMaxIdle, grpcSvrKeepaliveInterval, grpcSvrKeepaliveTimeout)
+	if err != nil {
+		zap.L().Sugar().Panicf("failed to construct grpc server: %s", err)
+	}
+
 	shutdownSig := make(chan os.Signal, 1)
 	signal.Notify(shutdownSig, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 	go func() {

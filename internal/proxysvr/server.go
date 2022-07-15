@@ -3,11 +3,14 @@ package proxysvr
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -19,6 +22,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/Azure/metaetcd/internal/membership"
@@ -51,8 +55,25 @@ func NewServer(coordinator *membership.CoordinatorClientSet, members *membership
 	}
 }
 
-func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
+func NewGRPCServer(ca, cert, key string, maxIdle, interval, timeout time.Duration) (*grpc.Server, error) {
+	parsedCert, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, err
+	}
+	tlsc := &tls.Config{
+		Certificates: []tls.Certificate{parsedCert},
+		RootCAs:      x509.NewCertPool(),
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	caPem, err := os.ReadFile(ca)
+	if err != nil {
+		return nil, err
+	}
+	if !tlsc.RootCAs.AppendCertsFromPEM(caPem) {
+		return nil, fmt.Errorf("invalid ca pem")
+	}
 	return grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(tlsc)),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle: maxIdle,
 			Time:              interval,
@@ -60,7 +81,7 @@ func NewGRPCServer(maxIdle, interval, timeout time.Duration) *grpc.Server {
 		}),
 		grpc.MaxRecvMsgSize(math.MaxInt32),
 		grpc.MaxSendMsgSize(math.MaxInt32),
-	)
+	), nil
 }
 
 func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
