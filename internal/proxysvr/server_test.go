@@ -98,7 +98,7 @@ func TestIntegrationBulk(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, lastSeenMetaRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 		assert.Len(t, resp.Kvs, 11)
-		assert.Equal(t, int64(11), resp.Count)
+		assert.Equal(t, int64(n), resp.Count)
 	})
 
 	t.Run("range page over the keyspace", func(t *testing.T) {
@@ -114,8 +114,10 @@ func TestIntegrationBulk(t *testing.T) {
 				break
 			}
 
-			require.NotEmpty(t, resp.Kvs)
-			startKey = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
+			// TODO: This smells sus
+			if !assert.NotEmpty(t, resp.Kvs) {
+				startKey = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
+			}
 		}
 
 		for i := 0; i < n; i++ {

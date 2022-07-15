@@ -92,7 +92,6 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		requestCount.WithLabelValues("Range").Inc()
 	}
 
-	limit := req.Limit
 	var metaRev int64
 	if req.Revision != 0 {
 		metaRev = req.Revision
@@ -119,18 +118,17 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	err := s.members.IterateMembers(ctx, func(ctx context.Context, client *membership.ClientSet) error {
 		return s.rangeWithClient(ctx, req, resp, metaRev, client, &mut)
 	})
+	if req.Limit != 0 && int64(len(resp.Kvs)) > req.Limit {
+		// TODO: Make sure to add test coverage for the sorting below
+		sort.Slice(resp.Kvs, func(i, j int) bool { return bytes.Compare(resp.Kvs[i].Key, resp.Kvs[j].Key) < 0 })
+		resp.Kvs = resp.Kvs[:req.Limit]
+		resp.More = true
+	}
 	if err != nil {
 		zap.L().Info("completed range with error", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)), zap.Error(err))
 		return nil, err
 	}
-	zap.L().Info("completed range successfully", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Duration("latency", time.Since(start)))
-
-	sort.Slice(resp.Kvs, func(i, j int) bool { return bytes.Compare(resp.Kvs[i].Key, resp.Kvs[j].Key) > 0 })
-	if limit != 0 && int64(len(resp.Kvs)) > limit {
-		resp.Kvs = resp.Kvs[:limit]
-		resp.Count = limit
-		resp.More = true
-	}
+	zap.L().Info("completed range successfully", zap.String("start", string(req.Key)), zap.String("end", string(req.RangeEnd)), zap.Int64("metaRev", metaRev), zap.Int64("count", resp.Count), zap.Int64("limit", req.Limit), zap.Duration("latency", time.Since(start)))
 
 	return resp, nil
 }
