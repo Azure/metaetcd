@@ -460,7 +460,15 @@ func (s *server) Compact(ctx context.Context, req *etcdserverpb.CompactionReques
 		return nil, err
 	}
 
-	// TODO: Also compact coordinator
+	reqCopy := *req
+	reqCopy.Revision, err = s.getMemberRev(ctx, s.coordinator.ClientV3, req.Revision)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = s.coordinator.KV.Compact(ctx, &reqCopy); err != nil {
+		return nil, err
+	}
 
 	return &etcdserverpb.CompactionResponse{}, nil
 }
