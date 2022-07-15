@@ -58,17 +58,19 @@ func NewGRPCServer(ca, cert, key string, maxIdle, interval, timeout time.Duratio
 	if err != nil {
 		return nil, err
 	}
-	tlsc := &tls.Config{
-		Certificates: []tls.Certificate{parsedCert},
-		RootCAs:      x509.NewCertPool(),
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-	}
+	cas := x509.NewCertPool()
 	caPem, err := os.ReadFile(ca)
 	if err != nil {
 		return nil, err
 	}
-	if !tlsc.RootCAs.AppendCertsFromPEM(caPem) {
+	if !cas.AppendCertsFromPEM(caPem) {
 		return nil, fmt.Errorf("invalid ca pem")
+	}
+	tlsc := &tls.Config{
+		Certificates: []tls.Certificate{parsedCert},
+		RootCAs:      cas,
+		ClientCAs:    cas,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
 	}
 	return grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsc)),
