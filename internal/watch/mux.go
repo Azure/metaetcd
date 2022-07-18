@@ -1,7 +1,6 @@
 package watch
 
 import (
-	"container/list"
 	"context"
 	"fmt"
 	"time"
@@ -73,28 +72,9 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	}
 }
 
-func (m *Mux) Watch(key, end []byte, rev int64) *Watch {
-	pos, ok := m.buffer.StartRange(rev)
-	if !ok {
-		return nil
-	}
-
-	// TODO: Consider one tree per incoming watch connection (like etcd does)
-	tree := adt.NewIntervalTree()
-	tree.Insert(adt.NewStringAffineInterval(string(key), string(end)), nil)
-
-	return &Watch{m: m, pos: pos, tree: tree}
-}
-
-type Watch struct {
-	m    *Mux
-	pos  *list.Element
-	tree adt.IntervalTree
-}
-
-func (w *Watch) Run(ctx context.Context, ch chan<- *etcdserverpb.WatchResponse) *Status {
+func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) bool {
 	broadcast := make(chan struct{}, 2)
-	close := w.m.bcast.Watch(broadcast)
+	close := m.bcast.Watch(broadcast)
 	go func() {
 		<-ctx.Done()
 		close()
@@ -102,15 +82,20 @@ func (w *Watch) Run(ctx context.Context, ch chan<- *etcdserverpb.WatchResponse) 
 
 	broadcast <- struct{}{}
 
+	// TODO: Consider one tree per incoming watch connection (like etcd does)
+	tree := adt.NewIntervalTree()
+	tree.Insert(adt.NewStringAffineInterval(string(key), string(end)), nil)
+
+	pos := m.buffer.StartRange(rev)
 	var n int
 	for range broadcast {
 		resp := &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}}
-		resp.Events, n, w.pos = w.m.buffer.Range(w.pos, w.tree)
+		resp.Events, n, pos = m.buffer.Range(pos, tree)
 		if n > 0 {
 			ch <- resp
 		}
 	}
-	return nil
+	return true
 }
 
 type Status struct {

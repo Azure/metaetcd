@@ -12,20 +12,22 @@ import (
 	"go.uber.org/zap"
 )
 
+// TODO: Return error for attempts to start watch connection before the oldest message in the buffer
+
 // TODO: Consider watching only the metakey instead of maintaining event buffer for entire keyspace
 
 type buffer struct {
-	mut                    sync.Mutex
-	list                   *list.List
-	gapTimeout             time.Duration
-	maxLen                 int
-	lowerBound, upperBound int64
-	bcast                  *broadcast
-	upperVal               *list.Element
+	mut        sync.Mutex
+	list       *list.List
+	gapTimeout time.Duration
+	maxLen     int
+	upperBound int64
+	bcast      *broadcast
+	upperVal   *list.Element
 }
 
 func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast) *buffer {
-	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast, lowerBound: -1}
+	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast}
 }
 
 func (b *buffer) Run(ctx context.Context) {
@@ -111,23 +113,12 @@ func (b *buffer) trimUnlocked() {
 	if front == b.upperVal {
 		return // don't trim events until the gap has been filled
 	}
-
-	next := front.Next()
-	if next != nil {
-		newFront := next.Value.(*eventWrapper)
-		b.lowerBound = newFront.Kv.ModRevision
-	}
-
 	b.list.Remove(front)
 }
 
-func (b *buffer) StartRange(start int64) (*list.Element, bool) {
+func (b *buffer) StartRange(start int64) *list.Element {
 	b.mut.Lock()
 	defer b.mut.Unlock()
-
-	if start < b.lowerBound {
-		return nil, false
-	}
 
 	val := b.list.Front()
 	for i := 0; true; i++ {
@@ -139,11 +130,11 @@ func (b *buffer) StartRange(start int64) (*list.Element, bool) {
 			break // buffer starts after the requested start rev
 		}
 		if e.Kv.ModRevision == start {
-			return val, true
+			return val
 		}
 		val = val.Next()
 	}
-	return nil, true
+	return nil
 }
 
 func (b *buffer) Range(start *list.Element, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, pos *list.Element) {
@@ -202,9 +193,6 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 		}
 
 		b.upperBound = valE.Kv.ModRevision
-		if b.lowerBound == -1 {
-			b.lowerBound = valE.Kv.ModRevision
-		}
 		currentWatchRev.Set(float64(b.upperBound))
 		watchLatency.Observe(age.Seconds())
 

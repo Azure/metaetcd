@@ -186,18 +186,9 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 						return err
 					}
 				}
-
-				watch := s.members.WatchMux.Watch(r.Key, r.RangeEnd, r.StartRevision)
-				if watch == nil {
-					zap.L().Warn("watch start revision is too early", zap.Int64("rev", r.StartRevision))
-					watchLateStartCount.Inc()
-					ch <- &etcdserverpb.WatchResponse{WatchId: r.WatchId, Created: false, Header: &etcdserverpb.ResponseHeader{}}
-					return nil
-				}
-
 				wg.Go(func() error {
-					zap.L().Info("starting watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
-					watch.Run(srv.Context(), ch)
+					zap.L().Info("adding keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
+					s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch)
 					return nil
 				})
 				ch <- &etcdserverpb.WatchResponse{WatchId: r.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
