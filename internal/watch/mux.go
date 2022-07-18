@@ -42,7 +42,12 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 		done:   make(chan struct{}),
 	}
 
-	startRev := resp.Header.Revision + 1
+	nextEvent := (resp.Header.Revision + 1)
+	startRev := nextEvent - int64(m.buffer.maxLen)
+	if startRev < 0 {
+		startRev = 0
+	}
+
 	ctx = clientv3.WithRequireLeader(ctx)
 	w := client.Watch(ctx, "", clientv3.WithPrefix(), clientv3.WithRev(startRev), clientv3.WithPrevKV())
 	go func() {
