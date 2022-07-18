@@ -181,20 +181,26 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 		}
 
 		isNextEvent := valE.Kv.ModRevision == b.upperBound+1
-		hasTimedout := time.Since(valE.Timestamp) > b.gapTimeout
+		age := time.Since(valE.Timestamp)
+		hasTimedout := age > b.gapTimeout
 		if hasTimedout && !isNextEvent {
 			zap.L().Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
+			watchGapTimeoutCount.Inc()
 		}
-		if isNextEvent || hasTimedout {
-			b.upperBound = valE.Kv.ModRevision
-			b.upperVal = val
-			changed = true
-			val = val.Next()
-			continue
+		if !isNextEvent && !hasTimedout {
+			ok = false
+			break
 		}
 
-		ok = false
-		break
+		b.upperBound = valE.Kv.ModRevision
+		currentWatchRev.Set(float64(b.upperBound))
+		watchLatency.Observe(age.Seconds())
+
+		changed = true
+		b.upperVal = val
+		val = val.Next()
+		continue
+
 	}
 	return ok, changed
 }

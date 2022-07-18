@@ -165,6 +165,9 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 
 func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 	requestCount.WithLabelValues("Watch").Inc()
+	activeWatchCount.Inc()
+	defer activeWatchCount.Dec()
+
 	wg, _ := errgroup.WithContext(srv.Context())
 	ch := make(chan *etcdserverpb.WatchResponse)
 	id := uuid.Must(uuid.NewRandom()).String()
