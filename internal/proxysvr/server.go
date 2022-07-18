@@ -276,6 +276,7 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 	for _, r := range resp.Responses {
 		if p := r.GetResponsePut(); p != nil {
 			scheme.ResolveModRev(p.PrevKv)
+			p.Header.Revision = metaRev
 		}
 		if p := r.GetResponseRange(); p != nil {
 			for _, kv := range p.Kvs {
@@ -285,6 +286,7 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		if p := r.GetResponseDeleteRange(); p != nil {
 			for _, kv := range p.PrevKvs {
 				scheme.ResolveModRev(kv)
+				p.Header.Revision = metaRev
 			}
 		}
 	}

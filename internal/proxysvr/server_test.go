@@ -172,7 +172,9 @@ func TestIntegrationBulk(t *testing.T) {
 			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", resp.Kvs[0].ModRevision)).
 			Then(clientv3.OpPut("key-1", "new-value-2")).Commit()
 		require.NoError(t, err)
+		assert.Equal(t, txnResp.Header.Revision, txnResp.Responses[0].GetResponsePut().Header.Revision)
 		lastSeenMetaRev = txnResp.Header.Revision
+		creationRevs["key-1"] = txnResp.Header.Revision
 
 		resp, err = client.Get(ctx, "key-1")
 		require.NoError(t, err)
@@ -186,7 +188,21 @@ func TestIntegrationBulk(t *testing.T) {
 			Then(clientv3.OpPut("key-1", "new-value-3")).Commit()
 		require.NoError(t, err)
 		assert.False(t, txnResp.Succeeded)
-		lastSeenMetaRev = txnResp.Header.Revision
+
+		resp, err := client.Get(ctx, "key-1")
+		require.NoError(t, err)
+		assert.Equal(t, "new-value-2", string(resp.Kvs[0].Value))
+	})
+
+	t.Run("update single key using incorrect mod rev constraint with get", func(t *testing.T) {
+		txnResp, err := client.Txn(ctx).
+			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", lastSeenMetaRev-10)).
+			Then(clientv3.OpPut("key-1", "new-value-3")).
+			Else(clientv3.OpGet("key-1")).Commit()
+		require.NoError(t, err)
+		assert.False(t, txnResp.Succeeded)
+		assert.Equal(t, int64(0), txnResp.Header.Revision)
+		assert.Equal(t, creationRevs["key-1"], txnResp.Responses[0].GetResponseRange().Kvs[0].ModRevision)
 
 		resp, err := client.Get(ctx, "key-1")
 		require.NoError(t, err)
