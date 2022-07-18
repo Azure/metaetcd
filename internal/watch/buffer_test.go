@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"container/list"
 	"context"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func TestBufferOrdering(t *testing.T) {
 
 	// The first event starts at rev 2, wait for the initial gap
 	b.Push(eventWithModRev(2))
-	_, n, _ := b.Range(b.StartRange(0), defaultKeyRange)
+	_, n, _ := b.Range(startRange(b, 0), defaultKeyRange)
 	assert.Equal(t, 0, n)
 	<-ch
 
@@ -40,7 +41,7 @@ func TestBufferOrdering(t *testing.T) {
 	b.Push(eventWithModRev(4))
 
 	// Full range - but only the first should be returned since there is a gap
-	buf, n, _ := b.Range(b.StartRange(0), defaultKeyRange)
+	buf, n, _ := b.Range(startRange(b, 0), defaultKeyRange)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, []int64{2}, testutil.EventModRevs(buf))
 
@@ -48,12 +49,12 @@ func TestBufferOrdering(t *testing.T) {
 	b.Push(eventWithModRev(3))
 
 	// Full range
-	buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
+	buf, n, _ = b.Range(startRange(b, 0), defaultKeyRange)
 	assert.Equal(t, 3, n)
 	assert.Equal(t, []int64{2, 3, 4}, testutil.EventModRevs(buf))
 
 	// Partial range
-	buf, n, _ = b.Range(b.StartRange(2), defaultKeyRange)
+	buf, n, _ = b.Range(startRange(b, 2), defaultKeyRange)
 	assert.Equal(t, 2, n)
 	assert.Equal(t, []int64{3, 4}, testutil.EventModRevs(buf))
 
@@ -62,7 +63,7 @@ func TestBufferOrdering(t *testing.T) {
 
 	// This gap is never filled - wait for the timeout
 	for {
-		buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
+		buf, n, _ = b.Range(startRange(b, 0), defaultKeyRange)
 		if n == 4 {
 			break
 		}
@@ -72,9 +73,12 @@ func TestBufferOrdering(t *testing.T) {
 
 	// Push another event, which will cause the earliest event to fall off
 	b.Push(eventWithModRev(7))
-	buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
+	buf, n, _ = b.Range(startRange(b, 2), defaultKeyRange)
 	assert.Equal(t, 4, n)
 	assert.Equal(t, []int64{3, 4, 6, 7}, testutil.EventModRevs(buf))
+
+	// Prove we can't start a range at a revision that has been trimmed
+	assert.Nil(t, startRange(b, 0))
 
 	cancel()
 	<-done
@@ -100,7 +104,7 @@ func TestBufferKeyFiltering(t *testing.T) {
 		Key:         []byte("foo/4"),
 	}}})
 
-	slice, _, _ := b.Range(b.StartRange(0), keyRange("bar", "bar0"))
+	slice, _, _ := b.Range(startRange(b, 0), keyRange("bar", "bar0"))
 	require.Len(t, slice, 2)
 	assert.Equal(t, []int64{2, 3}, testutil.EventModRevs(slice))
 }
@@ -128,3 +132,8 @@ func keyRange(from, to string) adt.IntervalTree {
 }
 
 var defaultKeyRange = keyRange("foo", "foo0")
+
+func startRange(b *buffer, rev int64) *list.Element {
+	el, _ := b.StartRange(rev)
+	return el
+}

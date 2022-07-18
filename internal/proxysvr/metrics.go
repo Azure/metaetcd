@@ -22,10 +22,17 @@ var (
 			Name: "metaetcd_active_watch_count",
 			Help: "Number of active watch connections.",
 		})
+
+	watchLateStartCount = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "metaetcd_watch_late_start_count",
+			Help: "Number of total watch requests with revisions that are too late.",
+		})
 )
 
 func init() {
 	prometheus.MustRegister(requestCount)
 	prometheus.MustRegister(getMemberRevDepth)
 	prometheus.MustRegister(activeWatchCount)
+	prometheus.MustRegister(watchLateStartCount)
 }
