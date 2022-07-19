@@ -7,6 +7,7 @@ import (
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
 
@@ -15,19 +16,30 @@ import (
 
 type Mux struct {
 	buffer *buffer
-	bcast  *broadcast
+	ch     chan *eventWrapper
+	tree   *groupTree[*mvccpb.Event]
 }
 
 func NewMux(gapTimeout time.Duration, bufferLen int) *Mux {
-	bcast := newBroadcast()
+	ch := make(chan *eventWrapper)
 	m := &Mux{
-		buffer: newBuffer(gapTimeout, bufferLen, bcast),
-		bcast:  bcast,
+		buffer: newBuffer(gapTimeout, bufferLen, ch),
+		ch:     ch,
+		tree:   newGroupTree[*mvccpb.Event](),
 	}
 	return m
 }
 
-func (m *Mux) Run(ctx context.Context) { m.buffer.Run(ctx) }
+func (m *Mux) Run(ctx context.Context) {
+	go m.buffer.Run(ctx)
+	go func() {
+		<-ctx.Done()
+		close(m.ch)
+	}()
+	for event := range m.ch {
+		m.tree.Broadcast(event.Key, event.Event)
+	}
+}
 
 func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 	resp, err := client.KV.Get(context.Background(), scheme.MetaKey)
@@ -66,36 +78,55 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 		if !ok {
 			continue // not a metaetcd event
 		}
+
 		zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
 		scheme.TransformEvents(meta, msg.Events)
 		m.buffer.Push(msg.Events)
 	}
 }
 
-func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) bool {
-	broadcast := make(chan struct{}, 2)
-	close := m.bcast.Watch(broadcast)
-	go func() {
-		<-ctx.Done()
-		close()
+func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) {
+	eventCh := make(chan *mvccpb.Event, 2000) // TODO: Make this tunable
+	i := adt.NewStringAffineInterval(string(key), string(end))
+
+	// Start listening for new events
+	var chanStartRev int64
+	func() {
+		m.buffer.mut.Lock()
+		defer m.buffer.mut.Unlock()
+		m.tree.Add(i, eventCh)
+		chanStartRev = m.buffer.upperBound
 	}()
 
-	broadcast <- struct{}{}
+	// Clean up when the context is canceled
+	go func() {
+		<-ctx.Done()
 
-	// TODO: Consider one tree per incoming watch connection (like etcd does)
-	tree := adt.NewIntervalTree()
-	tree.Insert(adt.NewStringAffineInterval(string(key), string(end)), nil)
+		m.tree.Remove(i, eventCh)
+		defer close(eventCh)
+	}()
 
-	pos := m.buffer.StartRange(rev)
-	var n int
-	for range broadcast {
-		resp := &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}}
-		resp.Events, n, pos = m.buffer.Range(pos, tree)
-		if n > 0 {
-			ch <- resp
+	// Backfill old events
+	var startingRev int64
+	for {
+		events, upperBound := m.buffer.Range(startingRev, i)
+		for _, event := range events {
+			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
 		}
+		startingRev = upperBound
+		if upperBound > chanStartRev {
+			break
+		}
+		time.Sleep(time.Millisecond * 100)
 	}
-	return true
+
+	// Map the event channel into the watch response channel
+	for event := range eventCh {
+		if event.Kv.ModRevision < startingRev {
+			continue
+		}
+		ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
+	}
 }
 
 type Status struct {

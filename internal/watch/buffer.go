@@ -22,12 +22,12 @@ type buffer struct {
 	gapTimeout time.Duration
 	maxLen     int
 	upperBound int64
-	bcast      *broadcast
 	upperVal   *list.Element
+	ch         chan<- *eventWrapper
 }
 
-func newBuffer(gapTimeout time.Duration, maxLen int, bcast *broadcast) *buffer {
-	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, bcast: bcast}
+func newBuffer(gapTimeout time.Duration, maxLen int, ch chan<- *eventWrapper) *buffer {
+	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch}
 }
 
 func (b *buffer) Run(ctx context.Context) {
@@ -38,10 +38,7 @@ func (b *buffer) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, ok := b.bridgeGapUnlocked()
-			if ok {
-				b.bcast.Send()
-			}
+			b.bridgeGapUnlocked()
 		}
 	}
 }
@@ -56,13 +53,9 @@ func (b *buffer) Push(events []*clientv3.Event) {
 	}
 }
 
-func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
+func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) {
 	b.pushUnlocked(event)
-	ok, _ := b.bridgeGapUnlocked()
-	if ok {
-		b.bcast.Send()
-	}
-	return ok
+	b.bridgeGapUnlocked()
 }
 
 func (b *buffer) pushUnlocked(event *mvccpb.Event) {
@@ -123,55 +116,33 @@ func (b *buffer) trimUnlocked() {
 	}
 }
 
-func (b *buffer) StartRange(start int64) *list.Element {
+func (b *buffer) Range(start int64, ivl adt.Interval) ([]*mvccpb.Event, int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	val := b.list.Front()
-	for i := 0; true; i++ {
-		if val == nil {
-			break
-		}
-		e := val.Value.(*eventWrapper)
-		if i == 0 && e.Kv.ModRevision > start {
-			break // buffer starts after the requested start rev
-		}
-		if e.Kv.ModRevision == start {
-			return val
-		}
-		val = val.Next()
-	}
-	return nil
-}
-
-func (b *buffer) Range(start *list.Element, ivl adt.IntervalTree) (slice []*mvccpb.Event, n int, pos *list.Element) {
-	b.mut.Lock()
-	defer b.mut.Unlock()
-
-	if start == nil {
-		pos = b.list.Front()
-	} else {
-		pos = start.Next()
-	}
+	slice := []*mvccpb.Event{}
+	pos := b.list.Front()
 	for {
 		if pos == nil {
 			break
 		}
 		e := pos.Value.(*eventWrapper)
+		if e.Kv.ModRevision <= start {
+			pos = pos.Next()
+			continue
+		}
 		if e.Kv.ModRevision > b.upperBound {
 			break
 		}
-		if ivl.Intersects(e.Key) {
-			n++
+		if ivl.Compare(&e.Key) == 0 {
 			slice = append(slice, e.Event)
 		}
 		pos = pos.Next()
 	}
-	return
+	return slice, b.upperBound
 }
 
-func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
-	ok = true
+func (b *buffer) bridgeGapUnlocked() {
 	val := b.upperVal
 	if val == nil {
 		val = b.list.Front()
@@ -195,22 +166,22 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 			watchGapTimeoutCount.Inc()
 		}
 		if !isNextEvent && !hasTimedout {
-			ok = false
 			break
 		}
 
+		if b.ch != nil {
+			b.ch <- valE
+		}
 		b.upperBound = valE.Kv.ModRevision
+		b.upperVal = val
 		currentWatchRev.Set(float64(b.upperBound))
 		watchLatency.Observe(age.Seconds())
 
-		changed = true
-		b.upperVal = val
 		val = val.Next()
 		continue
 
 	}
 	b.trimUnlocked()
-	return ok, changed
 }
 
 type eventWrapper struct {

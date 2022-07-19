@@ -15,14 +15,11 @@ import (
 )
 
 func TestBufferOrdering(t *testing.T) {
-	bcast := newBroadcast()
-	b := newBuffer(time.Millisecond*10, 4, bcast)
+	ch := make(chan *eventWrapper, 100)
+	b := newBuffer(time.Millisecond*10, 4, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	ch := make(chan struct{}, 1)
-	bcast.Watch(ch)
 
 	done := make(chan struct{})
 	go func() {
@@ -32,29 +29,26 @@ func TestBufferOrdering(t *testing.T) {
 
 	// The first event starts at rev 2, wait for the initial gap
 	b.Push(eventWithModRev(2))
-	_, n, _ := b.Range(b.StartRange(0), defaultKeyRange)
-	assert.Equal(t, 0, n)
+	buf, _ := b.Range(0, defaultKeyRange)
+	assert.Len(t, buf, 0)
 	<-ch
 
 	// Create gap
 	b.Push(eventWithModRev(4))
 
 	// Full range - but only the first should be returned since there is a gap
-	buf, n, _ := b.Range(b.StartRange(0), defaultKeyRange)
-	assert.Equal(t, 1, n)
+	buf, _ = b.Range(0, defaultKeyRange)
 	assert.Equal(t, []int64{2}, testutil.EventModRevs(buf))
 
 	// Fill the gap
 	b.Push(eventWithModRev(3))
 
 	// Full range
-	buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
-	assert.Equal(t, 3, n)
+	buf, _ = b.Range(0, defaultKeyRange)
 	assert.Equal(t, []int64{2, 3, 4}, testutil.EventModRevs(buf))
 
 	// Partial range
-	buf, n, _ = b.Range(b.StartRange(2), defaultKeyRange)
-	assert.Equal(t, 2, n)
+	buf, _ = b.Range(2, defaultKeyRange)
 	assert.Equal(t, []int64{3, 4}, testutil.EventModRevs(buf))
 
 	// Push event to create another gap
@@ -62,18 +56,17 @@ func TestBufferOrdering(t *testing.T) {
 
 	// This gap is never filled - wait for the timeout
 	for {
-		buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
-		if n == 4 {
+		buf, _ = b.Range(0, defaultKeyRange)
+		if len(buf) == 4 {
 			break
 		}
-		time.Sleep(time.Millisecond * 10)
+		time.Sleep(time.Millisecond * 5)
 	}
 	assert.Equal(t, []int64{2, 3, 4, 6}, testutil.EventModRevs(buf))
 
 	// Push another event, which will cause the earliest event to fall off
 	b.Push(eventWithModRev(7))
-	buf, n, _ = b.Range(b.StartRange(0), defaultKeyRange)
-	assert.Equal(t, 4, n)
+	buf, _ = b.Range(0, defaultKeyRange)
 	assert.Equal(t, []int64{3, 4, 6, 7}, testutil.EventModRevs(buf))
 
 	cancel()
@@ -81,7 +74,7 @@ func TestBufferOrdering(t *testing.T) {
 }
 
 func TestBufferKeyFiltering(t *testing.T) {
-	b := newBuffer(time.Millisecond*10, 10, newBroadcast())
+	b := newBuffer(time.Millisecond*10, 10, nil)
 
 	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 1,
@@ -100,13 +93,13 @@ func TestBufferKeyFiltering(t *testing.T) {
 		Key:         []byte("foo/4"),
 	}}})
 
-	slice, _, _ := b.Range(b.StartRange(0), keyRange("bar", "bar0"))
+	slice, _ := b.Range(0, adt.NewStringAffineInterval("bar", "bar0"))
 	require.Len(t, slice, 2)
 	assert.Equal(t, []int64{2, 3}, testutil.EventModRevs(slice))
 }
 
 func TestBufferBridgeGap(t *testing.T) {
-	b := newBuffer(time.Second, 10, newBroadcast())
+	b := newBuffer(time.Second, 10, nil)
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}
@@ -118,8 +111,7 @@ func TestBufferBridgeGap(t *testing.T) {
 }
 
 func TestBufferTrimWhenGap(t *testing.T) {
-	bcast := newBroadcast()
-	b := newBuffer(time.Millisecond, 2, bcast)
+	b := newBuffer(time.Millisecond, 2, nil)
 
 	// Fill the buffer and more
 	const n = 10
@@ -138,10 +130,4 @@ func eventWithModRev(rev int64) []*clientv3.Event {
 	return []*clientv3.Event{{Kv: &mvccpb.KeyValue{Key: []byte("foo/test"), ModRevision: rev}}}
 }
 
-func keyRange(from, to string) adt.IntervalTree {
-	tree := adt.NewIntervalTree()
-	tree.Insert(adt.NewStringAffineInterval(string(from), string(to)), nil)
-	return tree
-}
-
-var defaultKeyRange = keyRange("foo", "foo0")
+var defaultKeyRange = adt.NewStringAffineInterval("foo", "foo0")
