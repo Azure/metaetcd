@@ -117,6 +117,23 @@ func TestBufferBridgeGap(t *testing.T) {
 	}
 }
 
+func TestBufferTrimWhenGap(t *testing.T) {
+	bcast := newBroadcast()
+	b := newBuffer(time.Millisecond, 2, bcast)
+
+	// Fill the buffer and more
+	const n = 10
+	for i := 0; i < n; i++ {
+		b.Push(eventWithModRev(int64(i + 3)))
+	}
+	assert.Equal(t, n, b.list.Len())
+
+	// Bridge the gap and prove the buffer was shortened
+	time.Sleep(time.Millisecond * 2)
+	b.bridgeGapUnlocked()
+	assert.Equal(t, 2, b.list.Len())
+}
+
 func eventWithModRev(rev int64) []*clientv3.Event {
 	return []*clientv3.Event{{Kv: &mvccpb.KeyValue{Key: []byte("foo/test"), ModRevision: rev}}}
 }

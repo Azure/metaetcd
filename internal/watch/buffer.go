@@ -58,7 +58,6 @@ func (b *buffer) Push(events []*clientv3.Event) {
 func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
 	b.pushUnlocked(event)
 	ok, _ := b.bridgeGapUnlocked()
-	b.trimUnlocked()
 	if ok {
 		b.bcast.Send()
 	}
@@ -106,14 +105,19 @@ func (b *buffer) pushUnlocked(event *mvccpb.Event) {
 }
 
 func (b *buffer) trimUnlocked() {
-	if b.list.Len() <= b.maxLen {
-		return
+	item := b.list.Front()
+	for {
+		if b.list.Len() <= b.maxLen || item == nil {
+			return
+		}
+		event := item.Value.(*eventWrapper)
+
+		next := item.Next()
+		if b.upperBound > event.Kv.ModRevision {
+			b.list.Remove(item)
+		}
+		item = next
 	}
-	front := b.list.Front()
-	if front == b.upperVal {
-		return // don't trim events until the gap has been filled
-	}
-	b.list.Remove(front)
 }
 
 func (b *buffer) StartRange(start int64) *list.Element {
@@ -202,6 +206,7 @@ func (b *buffer) bridgeGapUnlocked() (ok, changed bool) {
 		continue
 
 	}
+	b.trimUnlocked()
 	return ok, changed
 }
 
