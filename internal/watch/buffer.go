@@ -47,6 +47,7 @@ func (b *buffer) Run(ctx context.Context) {
 }
 
 func (b *buffer) Push(events []*clientv3.Event) {
+	watchEventCount.Inc()
 	b.mut.Lock()
 	defer b.mut.Unlock()
 	for _, event := range events {
@@ -65,6 +66,7 @@ func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) bool {
 }
 
 func (b *buffer) pushUnlocked(event *mvccpb.Event) {
+	watchBufferLength.Inc()
 	lastEl := b.list.Back()
 	wrapped := &eventWrapper{Event: event, Timestamp: time.Now(), Key: adt.NewStringAffinePoint(string(event.Kv.Key))}
 
@@ -114,6 +116,7 @@ func (b *buffer) trimUnlocked() {
 
 		next := item.Next()
 		if b.upperBound > event.Kv.ModRevision {
+			watchBufferLength.Dec()
 			b.list.Remove(item)
 		}
 		item = next
