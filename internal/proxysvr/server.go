@@ -188,7 +188,9 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 				}
 				wg.Go(func() error {
 					zap.L().Info("adding keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
-					s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch)
+					if !s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch) {
+						return fmt.Errorf("starting rev is too old")
+					}
 					return nil
 				})
 				ch <- &etcdserverpb.WatchResponse{WatchId: r.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}

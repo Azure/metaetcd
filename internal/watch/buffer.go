@@ -12,22 +12,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// TODO: Return error for attempts to start watch connection before the oldest message in the buffer
-
 // TODO: Consider watching only the metakey instead of maintaining event buffer for entire keyspace
 
 type buffer struct {
-	mut        sync.Mutex
-	list       *list.List
-	gapTimeout time.Duration
-	maxLen     int
-	upperBound int64
-	upperVal   *list.Element
-	ch         chan<- *eventWrapper
+	mut                    sync.Mutex
+	list                   *list.List
+	gapTimeout             time.Duration
+	maxLen                 int
+	lowerBound, upperBound int64
+	upperVal               *list.Element
+	ch                     chan<- *eventWrapper
 }
 
 func newBuffer(gapTimeout time.Duration, maxLen int, ch chan<- *eventWrapper) *buffer {
-	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch}
+	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
 }
 
 func (b *buffer) Run(ctx context.Context) {
@@ -112,11 +110,15 @@ func (b *buffer) trimUnlocked() {
 			watchBufferLength.Dec()
 			b.list.Remove(item)
 		}
+		if next != nil {
+			newFront := next.Value.(*eventWrapper)
+			b.lowerBound = newFront.Kv.ModRevision
+		}
 		item = next
 	}
 }
 
-func (b *buffer) Range(start int64, ivl adt.Interval) ([]*mvccpb.Event, int64) {
+func (b *buffer) Range(start int64, ivl adt.Interval) ([]*mvccpb.Event, int64, int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
@@ -139,7 +141,7 @@ func (b *buffer) Range(start int64, ivl adt.Interval) ([]*mvccpb.Event, int64) {
 		}
 		pos = pos.Next()
 	}
-	return slice, b.upperBound
+	return slice, b.lowerBound, b.upperBound
 }
 
 func (b *buffer) bridgeGapUnlocked() {
@@ -174,6 +176,10 @@ func (b *buffer) bridgeGapUnlocked() {
 		}
 		b.upperBound = valE.Kv.ModRevision
 		b.upperVal = val
+		if b.lowerBound == -1 {
+			b.lowerBound = valE.Kv.ModRevision
+		}
+
 		currentWatchRev.Set(float64(b.upperBound))
 		watchLatency.Observe(age.Seconds())
 

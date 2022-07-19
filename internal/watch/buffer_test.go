@@ -29,7 +29,9 @@ func TestBufferOrdering(t *testing.T) {
 
 	// The first event starts at rev 2, wait for the initial gap
 	b.Push(eventWithModRev(2))
-	buf, _ := b.Range(0, defaultKeyRange)
+	buf, lb, up := b.Range(0, defaultKeyRange)
+	assert.Equal(t, int64(-1), lb)
+	assert.Equal(t, int64(0), up)
 	assert.Len(t, buf, 0)
 	<-ch
 
@@ -37,18 +39,24 @@ func TestBufferOrdering(t *testing.T) {
 	b.Push(eventWithModRev(4))
 
 	// Full range - but only the first should be returned since there is a gap
-	buf, _ = b.Range(0, defaultKeyRange)
+	buf, lb, up = b.Range(0, defaultKeyRange)
+	assert.Equal(t, int64(2), lb)
+	assert.Equal(t, int64(2), up)
 	assert.Equal(t, []int64{2}, testutil.EventModRevs(buf))
 
 	// Fill the gap
 	b.Push(eventWithModRev(3))
 
 	// Full range
-	buf, _ = b.Range(0, defaultKeyRange)
+	buf, lb, up = b.Range(0, defaultKeyRange)
+	assert.Equal(t, int64(2), lb)
+	assert.Equal(t, int64(4), up)
 	assert.Equal(t, []int64{2, 3, 4}, testutil.EventModRevs(buf))
 
 	// Partial range
-	buf, _ = b.Range(2, defaultKeyRange)
+	buf, lb, up = b.Range(2, defaultKeyRange)
+	assert.Equal(t, int64(2), lb)
+	assert.Equal(t, int64(4), up)
 	assert.Equal(t, []int64{3, 4}, testutil.EventModRevs(buf))
 
 	// Push event to create another gap
@@ -56,8 +64,10 @@ func TestBufferOrdering(t *testing.T) {
 
 	// This gap is never filled - wait for the timeout
 	for {
-		buf, _ = b.Range(0, defaultKeyRange)
+		buf, lb, up = b.Range(0, defaultKeyRange)
 		if len(buf) == 4 {
+			assert.Equal(t, int64(2), lb)
+			assert.Equal(t, int64(6), up)
 			break
 		}
 		time.Sleep(time.Millisecond * 5)
@@ -66,7 +76,9 @@ func TestBufferOrdering(t *testing.T) {
 
 	// Push another event, which will cause the earliest event to fall off
 	b.Push(eventWithModRev(7))
-	buf, _ = b.Range(0, defaultKeyRange)
+	buf, lb, up = b.Range(0, defaultKeyRange)
+	assert.Equal(t, int64(3), lb)
+	assert.Equal(t, int64(7), up)
 	assert.Equal(t, []int64{3, 4, 6, 7}, testutil.EventModRevs(buf))
 
 	cancel()
@@ -93,7 +105,7 @@ func TestBufferKeyFiltering(t *testing.T) {
 		Key:         []byte("foo/4"),
 	}}})
 
-	slice, _ := b.Range(0, adt.NewStringAffineInterval("bar", "bar0"))
+	slice, _, _ := b.Range(0, adt.NewStringAffineInterval("bar", "bar0"))
 	require.Len(t, slice, 2)
 	assert.Equal(t, []int64{2, 3}, testutil.EventModRevs(slice))
 }

@@ -85,7 +85,7 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	}
 }
 
-func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) {
+func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) bool {
 	eventCh := make(chan *mvccpb.Event, 2000) // TODO: Make this tunable
 	i := adt.NewStringAffineInterval(string(key), string(end))
 
@@ -97,19 +97,17 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 		m.tree.Add(i, eventCh)
 		chanStartRev = m.buffer.upperBound
 	}()
-
-	// Clean up when the context is canceled
-	go func() {
-		<-ctx.Done()
-
-		m.tree.Remove(i, eventCh)
-		defer close(eventCh)
-	}()
+	defer m.tree.Remove(i, eventCh)
 
 	// Backfill old events
 	var startingRev int64
 	for {
-		events, upperBound := m.buffer.Range(startingRev, i)
+		events, lowerBound, upperBound := m.buffer.Range(startingRev, i)
+		if lowerBound > rev {
+			zap.L().Warn("attempted to start watch before buffer", zap.Int64("lowerBound", lowerBound), zap.Int64("rev", rev))
+			staleWatchCount.Inc()
+			return false
+		}
 		for _, event := range events {
 			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
 		}
@@ -120,6 +118,11 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 		time.Sleep(time.Millisecond * 100)
 	}
 
+	go func() {
+		<-ctx.Done()
+		defer close(eventCh)
+	}()
+
 	// Map the event channel into the watch response channel
 	for event := range eventCh {
 		if event.Kv.ModRevision < startingRev {
@@ -127,6 +130,7 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 		}
 		ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
 	}
+	return true
 }
 
 type Status struct {

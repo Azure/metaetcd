@@ -32,6 +32,12 @@ var (
 			Name: "metaetcd_watch_latency_seconds",
 			Help: "The time between a watch event being received and exposed.",
 		})
+
+	staleWatchCount = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "metaetcd_stale_watch_count",
+			Help: "Number of stale watch connections.",
+		})
 )
 
 func init() {
@@ -40,4 +46,5 @@ func init() {
 	prometheus.MustRegister(watchEventCount)
 	prometheus.MustRegister(watchGapTimeoutCount)
 	prometheus.MustRegister(watchLatency)
+	prometheus.MustRegister(staleWatchCount)
 }
