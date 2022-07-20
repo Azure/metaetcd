@@ -101,9 +101,9 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 
 	// Backfill old events
 	var startingRev int64
-	for {
+	for j := 0; true; j++ {
 		events, lowerBound, upperBound := m.buffer.Range(startingRev, i)
-		if lowerBound > rev {
+		if j == 0 && lowerBound > rev {
 			zap.L().Warn("attempted to start watch before buffer", zap.Int64("lowerBound", lowerBound), zap.Int64("rev", rev))
 			staleWatchCount.Inc()
 			return false

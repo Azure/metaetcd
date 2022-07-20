@@ -97,7 +97,7 @@ func InitCoordinator(scc *SharedClientContext, endpointURL string) (*Coordinator
 		return nil, err
 	}
 
-	ctx, done := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, done := context.WithTimeout(context.Background(), time.Second*15)
 	defer done()
 
 	_, err = cs.ClientV3.KV.Txn(ctx).
