@@ -1,4 +1,4 @@
-package watch
+package util
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 	"go.etcd.io/etcd/pkg/v3/adt"
 )
 
-func TestBufferOrdering(t *testing.T) {
+func TestTimeBufferOrdering(t *testing.T) {
 	ch := make(chan *eventWrapper, 100)
-	b := newBuffer(time.Millisecond*10, 4, ch)
+	b := NewTimeBuffer(time.Millisecond*10, 4, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -81,8 +81,8 @@ func TestBufferOrdering(t *testing.T) {
 	<-done
 }
 
-func TestBufferBridgeGap(t *testing.T) {
-	b := newBuffer[*eventWrapper](time.Second, 10, nil)
+func TestTimeBufferBridgeGap(t *testing.T) {
+	b := NewTimeBuffer[*eventWrapper](time.Second, 10, nil)
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}
@@ -93,8 +93,8 @@ func TestBufferBridgeGap(t *testing.T) {
 	}
 }
 
-func TestBufferTrimWhenGap(t *testing.T) {
-	b := newBuffer[*eventWrapper](time.Millisecond, 2, nil)
+func TestTimeBufferTrimWhenGap(t *testing.T) {
+	b := NewTimeBuffer[*eventWrapper](time.Millisecond, 2, nil)
 
 	// Fill the buffer and more
 	const n = 10
@@ -128,3 +128,14 @@ func eventModRevs(events []*eventWrapper) []int64 {
 	}
 	return ret
 }
+
+// TODO
+type eventWrapper struct {
+	*mvccpb.Event
+	Key       adt.Interval
+	Timestamp time.Time
+}
+
+func (e *eventWrapper) GetAge() time.Duration { return time.Since(e.Timestamp) }
+func (e *eventWrapper) GetModRev() int64      { return e.Kv.ModRevision }
+func (e *eventWrapper) GetKey() *adt.Interval { return &e.Key } // TODO: Remove

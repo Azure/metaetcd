@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Azure/metaetcd/internal/util"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/mvcc/mvccpb"
@@ -17,7 +18,7 @@ type EventTransformer interface {
 }
 
 type Mux struct {
-	buffer      *buffer[*eventWrapper]
+	buffer      *util.TimeBuffer[*eventWrapper]
 	ch          chan *eventWrapper
 	tree        *groupTree[*mvccpb.Event]
 	transformer EventTransformer
@@ -26,7 +27,7 @@ type Mux struct {
 func NewMux(gapTimeout time.Duration, bufferLen int, et EventTransformer) *Mux {
 	ch := make(chan *eventWrapper)
 	m := &Mux{
-		buffer:      newBuffer(gapTimeout, bufferLen, ch),
+		buffer:      util.NewTimeBuffer(gapTimeout, bufferLen, ch),
 		ch:          ch,
 		tree:        newGroupTree[*mvccpb.Event](),
 		transformer: et,
@@ -58,7 +59,7 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 	}
 
 	nextEvent := (resp.Header.Revision + 1)
-	startRev := nextEvent - int64(m.buffer.maxLen)
+	startRev := nextEvent - int64(m.buffer.MaxLen())
 	if startRev < 0 {
 		startRev = 0
 	}
@@ -100,13 +101,8 @@ func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, c
 	i := adt.NewStringAffineInterval(string(req.Key), string(req.RangeEnd))
 
 	// Start listening for new events
-	var chanStartRev int64
-	func() {
-		m.buffer.mut.Lock()
-		defer m.buffer.mut.Unlock()
-		m.tree.Add(i, eventCh)
-		chanStartRev = m.buffer.upperBound
-	}()
+	m.tree.Add(i, eventCh)
+	chanStartRev := m.buffer.LatestVisibleRev()
 
 	ch <- &etcdserverpb.WatchResponse{WatchId: req.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
 
@@ -159,3 +155,13 @@ func (s *Status) Close() {
 	s.cancel()
 	<-s.done
 }
+
+type eventWrapper struct {
+	*mvccpb.Event
+	Key       adt.Interval
+	Timestamp time.Time
+}
+
+func (e *eventWrapper) GetAge() time.Duration { return time.Since(e.Timestamp) }
+func (e *eventWrapper) GetModRev() int64      { return e.Kv.ModRevision }
+func (e *eventWrapper) GetKey() *adt.Interval { return &e.Key } // TODO: Remove
