@@ -18,7 +18,7 @@ type EventTransformer interface {
 }
 
 type Mux struct {
-	buffer      *util.TimeBuffer[*eventWrapper]
+	buffer      *util.TimeBuffer[adt.Interval, *eventWrapper]
 	ch          chan *eventWrapper
 	tree        *groupTree[*mvccpb.Event]
 	transformer EventTransformer
@@ -27,7 +27,7 @@ type Mux struct {
 func NewMux(gapTimeout time.Duration, bufferLen int, et EventTransformer) *Mux {
 	ch := make(chan *eventWrapper)
 	m := &Mux{
-		buffer:      util.NewTimeBuffer(gapTimeout, bufferLen, ch),
+		buffer:      util.NewTimeBuffer[adt.Interval](gapTimeout, bufferLen, ch),
 		ch:          ch,
 		tree:        newGroupTree[*mvccpb.Event](),
 		transformer: et,
@@ -162,6 +162,6 @@ type eventWrapper struct {
 	Timestamp time.Time
 }
 
-func (e *eventWrapper) GetAge() time.Duration { return time.Since(e.Timestamp) }
-func (e *eventWrapper) GetModRev() int64      { return e.Kv.ModRevision }
-func (e *eventWrapper) GetKey() *adt.Interval { return &e.Key } // TODO: Remove
+func (e *eventWrapper) GetAge() time.Duration         { return time.Since(e.Timestamp) }
+func (e *eventWrapper) GetModRev() int64              { return e.Kv.ModRevision }
+func (e *eventWrapper) InRange(ivl adt.Interval) bool { return ivl.Compare(&e.Key) == 0 }

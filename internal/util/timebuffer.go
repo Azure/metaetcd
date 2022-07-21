@@ -6,39 +6,38 @@ import (
 	"sync"
 	"time"
 
-	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
 )
 
-type BufferableEvent interface {
+type BufferableEvent[T any] interface {
 	GetAge() time.Duration
 	GetModRev() int64
-	GetKey() *adt.Interval
+	InRange(T) bool
 }
 
-type TimeBuffer[T BufferableEvent] struct {
+type TimeBuffer[T any, TT BufferableEvent[T]] struct {
 	mut                    sync.Mutex
 	list                   *list.List
 	gapTimeout             time.Duration
 	maxLen                 int
 	lowerBound, upperBound int64
 	upperVal               *list.Element
-	ch                     chan<- T
+	ch                     chan<- TT
 }
 
-func NewTimeBuffer[T BufferableEvent](gapTimeout time.Duration, maxLen int, ch chan<- T) *TimeBuffer[T] {
-	return &TimeBuffer[T]{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
+func NewTimeBuffer[T any, TT BufferableEvent[T]](gapTimeout time.Duration, maxLen int, ch chan<- TT) *TimeBuffer[T, TT] {
+	return &TimeBuffer[T, TT]{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
 }
 
-func (t *TimeBuffer[T]) LatestVisibleRev() int64 {
+func (t *TimeBuffer[T, TT]) LatestVisibleRev() int64 {
 	t.mut.Lock()
 	defer t.mut.Unlock()
 	return t.upperBound
 }
 
-func (t *TimeBuffer[T]) MaxLen() int { return t.maxLen }
+func (t *TimeBuffer[T, TT]) MaxLen() int { return t.maxLen }
 
-func (t *TimeBuffer[T]) Run(ctx context.Context) {
+func (t *TimeBuffer[T, TT]) Run(ctx context.Context) {
 	ticker := time.NewTicker(t.gapTimeout)
 	defer ticker.Stop()
 	for {
@@ -51,7 +50,7 @@ func (t *TimeBuffer[T]) Run(ctx context.Context) {
 	}
 }
 
-func (t *TimeBuffer[T]) Push(event T) {
+func (t *TimeBuffer[T, TT]) Push(event TT) {
 	watchEventCount.Inc()
 	t.mut.Lock()
 	defer t.mut.Unlock()
@@ -60,7 +59,7 @@ func (t *TimeBuffer[T]) Push(event T) {
 	t.bridgeGapUnlocked()
 }
 
-func (t *TimeBuffer[T]) pushUnlocked(event T) {
+func (t *TimeBuffer[T, TT]) pushUnlocked(event TT) {
 	watchBufferLength.Inc()
 	lastEl := t.list.Back()
 
@@ -71,14 +70,14 @@ func (t *TimeBuffer[T]) pushUnlocked(event T) {
 	}
 
 	// Case 2: outside of range - insert before or after
-	last := lastEl.Value.(T)
+	last := lastEl.Value.(TT)
 	if event.GetModRev() > last.GetModRev() {
 		t.list.PushBack(event)
 		return
 	}
 
 	firstEl := t.list.Front()
-	first := firstEl.Value.(T)
+	first := firstEl.Value.(TT)
 	if event.GetModRev() < first.GetModRev() {
 		t.list.PushFront(event)
 		return
@@ -90,7 +89,7 @@ func (t *TimeBuffer[T]) pushUnlocked(event T) {
 		if firstEl == nil {
 			break
 		}
-		first = firstEl.Value.(T)
+		first = firstEl.Value.(TT)
 
 		if event.GetModRev() > first.GetModRev() {
 			t.list.InsertAfter(event, firstEl)
@@ -100,13 +99,13 @@ func (t *TimeBuffer[T]) pushUnlocked(event T) {
 	}
 }
 
-func (t *TimeBuffer[T]) trimUnlocked() {
+func (t *TimeBuffer[T, TT]) trimUnlocked() {
 	item := t.list.Front()
 	for {
 		if t.list.Len() <= t.maxLen || item == nil {
 			return
 		}
-		event := item.Value.(T)
+		event := item.Value.(TT)
 
 		next := item.Next()
 		if t.upperBound > event.GetModRev() {
@@ -114,24 +113,24 @@ func (t *TimeBuffer[T]) trimUnlocked() {
 			t.list.Remove(item)
 		}
 		if next != nil {
-			newFront := next.Value.(T)
+			newFront := next.Value.(TT)
 			t.lowerBound = newFront.GetModRev()
 		}
 		item = next
 	}
 }
 
-func (t *TimeBuffer[T]) Range(start int64, ivl adt.Interval) ([]T, int64, int64) {
+func (t *TimeBuffer[T, TT]) Range(start int64, ivl T) ([]TT, int64, int64) {
 	t.mut.Lock()
 	defer t.mut.Unlock()
 
-	slice := []T{}
+	slice := []TT{}
 	pos := t.list.Front()
 	for {
 		if pos == nil {
 			break
 		}
-		e := pos.Value.(T)
+		e := pos.Value.(TT)
 		if e.GetModRev() <= start {
 			pos = pos.Next()
 			continue
@@ -139,7 +138,7 @@ func (t *TimeBuffer[T]) Range(start int64, ivl adt.Interval) ([]T, int64, int64)
 		if e.GetModRev() > t.upperBound {
 			break
 		}
-		if ivl.Compare(e.GetKey()) == 0 {
+		if e.InRange(ivl) {
 			slice = append(slice, e)
 		}
 		pos = pos.Next()
@@ -147,7 +146,7 @@ func (t *TimeBuffer[T]) Range(start int64, ivl adt.Interval) ([]T, int64, int64)
 	return slice, t.lowerBound, t.upperBound
 }
 
-func (t *TimeBuffer[T]) bridgeGapUnlocked() {
+func (t *TimeBuffer[T, TT]) bridgeGapUnlocked() {
 	val := t.upperVal
 	if val == nil {
 		val = t.list.Front()
@@ -156,7 +155,7 @@ func (t *TimeBuffer[T]) bridgeGapUnlocked() {
 		if val == nil || val.Value == nil {
 			break
 		}
-		valE := val.Value.(T)
+		valE := val.Value.(TT)
 
 		if valE.GetModRev() <= t.upperBound {
 			val = val.Next()

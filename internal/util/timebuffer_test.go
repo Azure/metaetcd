@@ -12,7 +12,7 @@ import (
 
 func TestTimeBufferOrdering(t *testing.T) {
 	ch := make(chan *eventWrapper, 100)
-	b := NewTimeBuffer(time.Millisecond*10, 4, ch)
+	b := NewTimeBuffer[adt.Interval](time.Millisecond*10, 4, ch)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,7 +82,7 @@ func TestTimeBufferOrdering(t *testing.T) {
 }
 
 func TestTimeBufferBridgeGap(t *testing.T) {
-	b := NewTimeBuffer[*eventWrapper](time.Second, 10, nil)
+	b := NewTimeBuffer[adt.Interval, *eventWrapper](time.Second, 10, nil)
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}
@@ -94,7 +94,7 @@ func TestTimeBufferBridgeGap(t *testing.T) {
 }
 
 func TestTimeBufferTrimWhenGap(t *testing.T) {
-	b := NewTimeBuffer[*eventWrapper](time.Millisecond, 2, nil)
+	b := NewTimeBuffer[adt.Interval, *eventWrapper](time.Millisecond, 2, nil)
 
 	// Fill the buffer and more
 	const n = 10
@@ -136,6 +136,6 @@ type eventWrapper struct {
 	Timestamp time.Time
 }
 
-func (e *eventWrapper) GetAge() time.Duration { return time.Since(e.Timestamp) }
-func (e *eventWrapper) GetModRev() int64      { return e.Kv.ModRevision }
-func (e *eventWrapper) GetKey() *adt.Interval { return &e.Key } // TODO: Remove
+func (e *eventWrapper) GetAge() time.Duration         { return time.Since(e.Timestamp) }
+func (e *eventWrapper) GetModRev() int64              { return e.Kv.ModRevision }
+func (e *eventWrapper) InRange(ivl adt.Interval) bool { return ivl.Compare(&e.Key) == 0 }
