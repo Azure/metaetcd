@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/Azure/metaetcd/internal/clock"
 	"github.com/Azure/metaetcd/internal/membership"
 	"github.com/Azure/metaetcd/internal/proxysvr"
 	"github.com/Azure/metaetcd/internal/watch"
@@ -103,8 +104,15 @@ func main() {
 		zap.L().Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
 	}
 
-	watchMux := watch.NewMux(watchTimeout, watchBufferLen)
+	clk := &clock.Clock{Coordinator: coordClient}
+	watchMux := watch.NewMux(watchTimeout, watchBufferLen, clk)
 	pool := membership.NewPool(&grpcContext, watchMux)
+	clk.Members = pool
+
+	if err := clk.Init(); err != nil {
+		zap.L().Sugar().Panicf("failed to initialize clock: %s", err)
+	}
+
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {
 		err = pool.AddMember(membership.MemberID(i), memberURL, partitions[i])
@@ -138,7 +146,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Add(-1)
-		svr := proxysvr.NewServer(coordClient, pool)
+		svr := proxysvr.NewServer(coordClient, pool, clk)
 		etcdserverpb.RegisterKVServer(grpcServer, svr)
 		etcdserverpb.RegisterWatchServer(grpcServer, svr)
 		etcdserverpb.RegisterLeaseServer(grpcServer, svr)

@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -15,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/api/v3rpc/rpctypes"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/google/uuid"
@@ -25,8 +22,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/Azure/metaetcd/internal/clock"
 	"github.com/Azure/metaetcd/internal/membership"
-	"github.com/Azure/metaetcd/internal/scheme"
 )
 
 type Server interface {
@@ -42,12 +39,14 @@ type server struct {
 
 	coordinator *membership.CoordinatorClientSet
 	members     *membership.Pool
+	clock       *clock.Clock
 }
 
-func NewServer(coordinator *membership.CoordinatorClientSet, members *membership.Pool) Server {
+func NewServer(coord *membership.CoordinatorClientSet, members *membership.Pool, clock *clock.Clock) Server {
 	return &server{
-		coordinator: coordinator,
+		coordinator: coord,
 		members:     members,
+		clock:       clock,
 	}
 }
 
@@ -95,7 +94,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 		metaRev = req.Revision
 	} else {
 		var err error
-		metaRev, err = s.now(ctx)
+		metaRev, err = s.clock.Now(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +131,7 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 }
 
 func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeRequest, resp *etcdserverpb.RangeResponse, metaRev int64, client *membership.ClientSet, mut *sync.Mutex) error {
-	memberRev, err := s.getMemberRev(ctx, client.ClientV3, metaRev)
+	memberRev, err := s.clock.ResolveMetaToMember(ctx, client, metaRev)
 	if err != nil {
 		return err
 	}
@@ -146,9 +145,8 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 
 	resp.Count += r.Count
 	if !req.CountOnly {
-		for _, kv := range r.Kvs {
-			scheme.ResolveModRev(kv)
-		}
+		s.clock.MungeRangeResp(r)
+
 		if mut != nil {
 			mut.Lock()
 		}
@@ -180,7 +178,7 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 			}
 			if r := msg.GetCreateRequest(); r != nil {
 				if r.StartRevision == 0 {
-					r.StartRevision, err = s.now(ctx)
+					r.StartRevision, err = s.clock.Now(ctx)
 					if err != nil {
 						return err
 					}
@@ -219,15 +217,8 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 
 func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
 	requestCount.WithLabelValues("Txn").Inc()
-	key, err := scheme.ValidateTxComparisons(req.Compare)
-	if err != nil {
-		return nil, err
-	}
-	key, err = scheme.ValidateTxOps(key, req.Success)
-	if err != nil {
-		return nil, err
-	}
-	key, err = scheme.ValidateTxOps(key, req.Failure)
+
+	key, err := s.clock.MungeTxnPreflight(req)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +233,7 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		if r.ModRevision == 0 {
 			continue
 		}
-		memberRev, resp, err := s.resolveModComparison(ctx, client, key, r.ModRevision, req)
+		memberRev, resp, err := s.clock.ResolveMetaToMemberTxn(ctx, client, key, r.ModRevision, req)
 		if err != nil {
 			return nil, err
 		}
@@ -252,49 +243,19 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		r.ModRevision = memberRev
 	}
 
-	metaRev, err := s.tick(ctx)
+	metaRev, err := s.clock.Tick(ctx)
 	if err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(metaRev))
-	scheme.AppendMetaRevToTxOps(buf, req.Success)
-	scheme.AppendMetaRevToTxOps(buf, req.Failure)
-
-	updateClockOp := &etcdserverpb.RequestOp{
-		Request: &etcdserverpb.RequestOp_RequestPut{
-			RequestPut: &etcdserverpb.PutRequest{
-				Key:   []byte(scheme.MetaKey),
-				Value: buf,
-			},
-		},
-	}
-	req.Success = append(req.Success, updateClockOp)
-	req.Failure = append(req.Failure, updateClockOp)
+	s.clock.MungeTxn(metaRev, req)
 
 	resp, err := client.KV.Txn(ctx, req)
 	if err != nil {
 		zap.L().Error("error sending tx", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Error(err))
 		return nil, err
 	}
-	for _, r := range resp.Responses {
-		if p := r.GetResponsePut(); p != nil {
-			scheme.ResolveModRev(p.PrevKv)
-			p.Header.Revision = metaRev
-		}
-		if p := r.GetResponseRange(); p != nil {
-			for _, kv := range p.Kvs {
-				scheme.ResolveModRev(kv)
-			}
-		}
-		if p := r.GetResponseDeleteRange(); p != nil {
-			for _, kv := range p.PrevKvs {
-				scheme.ResolveModRev(kv)
-				p.Header.Revision = metaRev
-			}
-		}
-	}
-	resp.Header = &etcdserverpb.ResponseHeader{Revision: metaRev}
+	s.clock.MungeTxnResp(metaRev, resp)
+
 	if resp.Succeeded {
 		zap.L().Info("tx applied successfully", zap.String("key", string(key)), zap.Int64("metaRev", metaRev))
 	} else {
@@ -304,108 +265,8 @@ func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdse
 		}
 		zap.L().Error("tx failed", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64s("cmpModRevs", revs))
 	}
+
 	return resp, nil
-}
-
-func (s *server) tick(ctx context.Context) (int64, error) {
-	resp, err := s.coordinator.ClientV3.KV.Txn(ctx).Then(
-		clientv3.OpPut(scheme.MetaKey, "", clientv3.WithIgnoreValue()),
-		clientv3.OpGet(scheme.MetaKey),
-	).Commit()
-	if errors.Is(err, rpctypes.ErrKeyNotFound) {
-		return s.reconstituteClock(ctx, 1)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("ticking clock: %w", err)
-	}
-	return scheme.ResolveMetaRev(resp.Responses[1].GetResponseRange().Kvs[0]), nil
-}
-
-func (s *server) now(ctx context.Context) (int64, error) {
-	resp, err := s.coordinator.ClientV3.Get(ctx, scheme.MetaKey)
-	if err != nil {
-		return 0, fmt.Errorf("getting clock: %w", err)
-	}
-	if len(resp.Kvs) == 0 {
-		return s.reconstituteClock(ctx, 0)
-	}
-	return scheme.ResolveMetaRev(resp.Kvs[0]), nil
-}
-
-func (s *server) reconstituteClock(ctx context.Context, delta int64) (int64, error) {
-	s.coordinator.ClockReconstitutionLock.Lock(ctx)
-	defer s.coordinator.ClockReconstitutionLock.Unlock(context.Background())
-
-	resp, err := s.coordinator.ClientV3.Get(ctx, scheme.MetaKey)
-	if err != nil {
-		return 0, fmt.Errorf("getting clock: %w", err)
-	}
-	if len(resp.Kvs) > 0 {
-		return scheme.ResolveMetaRev(resp.Kvs[0]), nil
-	}
-
-	zap.L().Error("clock was lost - reconstituting from member clusters")
-
-	var mut sync.Mutex
-	var latestMetaRev int64
-	s.members.IterateMembers(ctx, func(ctx context.Context, client *membership.ClientSet) error {
-		r, err := client.ClientV3.KV.Get(ctx, scheme.MetaKey)
-		if err != nil {
-			return err
-		}
-		if len(r.Kvs) == 0 || len(r.Kvs[0].Value) < 8 {
-			return nil
-		}
-		rev := int64(binary.LittleEndian.Uint64(r.Kvs[0].Value))
-		mut.Lock()
-		defer mut.Unlock()
-		if rev > latestMetaRev {
-			latestMetaRev = rev
-		}
-		return nil
-	})
-	latestMetaRev += delta
-
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, uint64(latestMetaRev)-1)
-
-	_, err = s.coordinator.ClientV3.KV.Put(ctx, scheme.MetaKey, string(buf))
-	if err != nil {
-		return 0, err
-	}
-
-	zap.L().Info("reconstituted meta cluster logic clock", zap.Int64("metaRev", latestMetaRev))
-	return latestMetaRev, nil
-}
-
-func (s *server) getMemberRev(ctx context.Context, client *clientv3.Client, metaRev int64) (int64, error) {
-	var zeroKeyRev int64
-	i := 0
-	for {
-		i++
-		var opts []clientv3.OpOption
-		if zeroKeyRev > 0 {
-			opts = append(opts, clientv3.WithRev(zeroKeyRev))
-		}
-		resp, err := client.KV.Get(ctx, scheme.MetaKey, opts...)
-		if err != nil {
-			return 0, err
-		}
-
-		if len(resp.Kvs) == 0 {
-			return resp.Header.Revision, nil
-		}
-
-		lastMetaRev := int64(binary.LittleEndian.Uint64(resp.Kvs[0].Value))
-		if lastMetaRev > metaRev {
-			zeroKeyRev = resp.Kvs[0].ModRevision - 1
-			continue
-		}
-
-		zap.L().Info("resolved member rev", zap.Int("attempts", i))
-		getMemberRevDepth.Observe(float64(i))
-		return resp.Kvs[0].ModRevision, nil
-	}
 }
 
 func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantRequest) (*etcdserverpb.LeaseGrantResponse, error) {
@@ -434,28 +295,10 @@ func (s *server) LeaseGrant(ctx context.Context, req *etcdserverpb.LeaseGrantReq
 	}, nil
 }
 
-func (s *server) resolveModComparison(ctx context.Context, client *membership.ClientSet, key []byte, metaRev int64, req *etcdserverpb.TxnRequest) (int64, *etcdserverpb.TxnResponse, error) {
-	resp, err := client.ClientV3.Get(ctx, string(key))
-	if err != nil {
-		return 0, nil, err
-	}
-	if len(resp.Kvs) == 0 {
-		return 0, nil, nil
-	}
-
-	modMetaRev, failureResp := scheme.PreflightTxn(metaRev, req, resp)
-	if failureResp != nil {
-		zap.L().Warn("tx failed pre-check", zap.String("key", string(key)), zap.Int64("metaRev", metaRev), zap.Int64("actualModMetaRev", modMetaRev))
-		return 0, failureResp, nil
-	}
-
-	return resp.Kvs[0].ModRevision, nil, nil
-}
-
 func (s *server) Compact(ctx context.Context, req *etcdserverpb.CompactionRequest) (*etcdserverpb.CompactionResponse, error) {
 	err := s.members.IterateMembers(ctx, func(ctx context.Context, cs *membership.ClientSet) (err error) {
 		reqCopy := *req
-		reqCopy.Revision, err = s.getMemberRev(ctx, cs.ClientV3, req.Revision)
+		reqCopy.Revision, err = s.clock.ResolveMetaToMember(ctx, cs, req.Revision)
 		if err != nil {
 			return err
 		}
@@ -468,7 +311,7 @@ func (s *server) Compact(ctx context.Context, req *etcdserverpb.CompactionReques
 	}
 
 	reqCopy := *req
-	reqCopy.Revision, err = s.getMemberRev(ctx, s.coordinator.ClientV3, req.Revision)
+	reqCopy.Revision, err = s.clock.ResolveMetaToMember(ctx, s.coordinator.ClientSet, req.Revision)
 	if err != nil {
 		return nil, err
 	}

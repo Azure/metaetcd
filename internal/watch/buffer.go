@@ -6,12 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
-
-	"github.com/Azure/metaetcd/internal/scheme"
 )
 
 type buffer struct {
@@ -41,22 +38,13 @@ func (b *buffer) Run(ctx context.Context) {
 	}
 }
 
-func (b *buffer) Push(events []*clientv3.Event) {
+func (b *buffer) Push(events []*mvccpb.Event) {
 	watchEventCount.Inc()
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	if len(events) == 1 { // only the meta event
-		e := mvccpb.Event(*events[0])
-		b.pushOrDeferUnlocked(&e)
-		return
-	}
 	for _, event := range events {
-		if string(event.Kv.Key) == scheme.MetaKey {
-			continue
-		}
-		e := mvccpb.Event(*event)
-		b.pushOrDeferUnlocked(&e)
+		b.pushOrDeferUnlocked(event)
 	}
 }
 

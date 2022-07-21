@@ -1,11 +1,8 @@
 package testutil
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"os/exec"
 	"testing"
 	"time"
@@ -20,7 +17,7 @@ func StartEtcds(t testing.TB, n int) []*clientv3.Client {
 	clients := make([]*clientv3.Client, n)
 	for i := 0; i < n; i++ {
 		client, err := clientv3.New(clientv3.Config{
-			Endpoints:   []string{StartEtcd(t, fmt.Sprintf("cluster-%d", i))},
+			Endpoints:   []string{StartEtcd(t)},
 			DialTimeout: 2 * time.Second,
 		})
 		require.NoError(t, err)
@@ -29,7 +26,7 @@ func StartEtcds(t testing.TB, n int) []*clientv3.Client {
 	return clients
 }
 
-func StartEtcd(t testing.TB, name string) string {
+func StartEtcd(t testing.TB) string {
 	peerPort := GetPort(t)
 	clientPort := GetPort(t)
 
@@ -42,11 +39,6 @@ func StartEtcd(t testing.TB, name string) string {
 		"--debug",
 	)
 	cmd.Dir = t.TempDir()
-
-	if os.Getenv("ETCD_DEBUG") != "" {
-		cmd.Stderr = addPrefixToWriter(name)
-		cmd.Stdout = addPrefixToWriter(name)
-	}
 
 	t.Cleanup(func() {
 		if err := cmd.Process.Kill(); err != nil {
@@ -63,17 +55,6 @@ func GetPort(t testing.TB) int {
 	require.NoError(t, err)
 	listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
-}
-
-func addPrefixToWriter(prefix string) io.Writer {
-	r, w := io.Pipe()
-	go func() {
-		s := bufio.NewScanner(r)
-		for s.Scan() {
-			fmt.Fprintf(os.Stdout, "%s - %s\n", prefix, s.Text())
-		}
-	}()
-	return w
 }
 
 func EventKeys(events []*mvccpb.Event) []string {

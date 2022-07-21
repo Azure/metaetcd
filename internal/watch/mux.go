@@ -10,22 +10,26 @@ import (
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
-
-	"github.com/Azure/metaetcd/internal/scheme"
 )
 
-type Mux struct {
-	buffer *buffer
-	ch     chan *eventWrapper
-	tree   *groupTree[*mvccpb.Event]
+type EventTransformer interface {
+	MungeEvents([]*clientv3.Event) (metaRev int64, events []*mvccpb.Event, ok bool)
 }
 
-func NewMux(gapTimeout time.Duration, bufferLen int) *Mux {
+type Mux struct {
+	buffer      *buffer
+	ch          chan *eventWrapper
+	tree        *groupTree[*mvccpb.Event]
+	transformer EventTransformer
+}
+
+func NewMux(gapTimeout time.Duration, bufferLen int, et EventTransformer) *Mux {
 	ch := make(chan *eventWrapper)
 	m := &Mux{
-		buffer: newBuffer(gapTimeout, bufferLen, ch),
-		ch:     ch,
-		tree:   newGroupTree[*mvccpb.Event](),
+		buffer:      newBuffer(gapTimeout, bufferLen, ch),
+		ch:          ch,
+		tree:        newGroupTree[*mvccpb.Event](),
+		transformer: et,
 	}
 	return m
 }
@@ -42,7 +46,7 @@ func (m *Mux) Run(ctx context.Context) {
 }
 
 func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
-	resp, err := client.KV.Get(context.Background(), scheme.MetaKey)
+	resp, err := client.KV.Get(context.Background(), "a")
 	if err != nil {
 		return nil, fmt.Errorf("getting current revision: %w", err)
 	}
@@ -74,14 +78,12 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 
 func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	for msg := range w {
-		meta, ok := scheme.FindMetaEvent(msg.Events)
+		meta, events, ok := m.transformer.MungeEvents(msg.Events)
 		if !ok {
-			continue // not a metaetcd event
+			continue
 		}
-
 		zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
-		scheme.TransformEvents(meta, msg.Events)
-		m.buffer.Push(msg.Events)
+		m.buffer.Push(events)
 	}
 }
 

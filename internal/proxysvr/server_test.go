@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
+	"github.com/Azure/metaetcd/internal/clock"
 	"github.com/Azure/metaetcd/internal/membership"
-	"github.com/Azure/metaetcd/internal/scheme"
 	"github.com/Azure/metaetcd/internal/testutil"
 	"github.com/Azure/metaetcd/internal/watch"
 )
@@ -25,7 +25,7 @@ var ctx = context.Background()
 func TestIntegrationBulk(t *testing.T) {
 	n := 100
 	var lastSeenMetaRev int64
-	client, coord := startServer(t)
+	client, s := startServer(t)
 
 	watchCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,15 +148,13 @@ func TestIntegrationBulk(t *testing.T) {
 
 	// Delete the clock state from the coordinator before sending a range to test reconstitution on reads
 	t.Run("delete clock state", func(t *testing.T) {
-		_, err := coord.KV.Delete(ctx, scheme.MetaKey)
-		require.NoError(t, err)
+		require.NoError(t, s.clock.Reset(ctx))
 	})
 	rangeAll()
 
 	// Delete clock state again to test reconstitution on writes (next step in test)
 	t.Run("delete clock state again", func(t *testing.T) {
-		_, err := coord.KV.Delete(ctx, scheme.MetaKey)
-		require.NoError(t, err)
+		require.NoError(t, s.clock.Reset(ctx))
 	})
 
 	// Update a single key and prove the mod rev reflects the meta cluster rev
@@ -225,10 +223,10 @@ func TestIntegrationBulk(t *testing.T) {
 	})
 }
 
-func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
-	coordinatoorURL := testutil.StartEtcd(t, "COORDINATOR")
-	member1URL := testutil.StartEtcd(t, "MEMBER-1")
-	member2URL := testutil.StartEtcd(t, "MEMBER-2")
+func startServer(t testing.TB) (*clientv3.Client, *server) {
+	coordinatoorURL := testutil.StartEtcd(t)
+	member1URL := testutil.StartEtcd(t)
+	member2URL := testutil.StartEtcd(t)
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	require.NoError(t, err)
@@ -247,7 +245,7 @@ func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
 		DialTimeout: 2 * time.Second,
 	})
 	require.NoError(t, err)
-	return client, svr.(*server).coordinator.ClientV3
+	return client, svr.(*server)
 }
 
 func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTimeout time.Duration) Server {
@@ -255,8 +253,10 @@ func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTi
 	coordinator, err := membership.InitCoordinator(gc, coordinatorURL)
 	require.NoError(t, err)
 
-	watchMux := watch.NewMux(time.Second, 200)
+	clk := &clock.Clock{Coordinator: coordinator}
+	watchMux := watch.NewMux(time.Second, 200, clk)
 	members := membership.NewPool(gc, watchMux)
+	clk.Members = members
 
 	partitions := membership.NewStaticPartitions(len(memberURLs))
 	for i, memberURL := range memberURLs {
@@ -276,7 +276,9 @@ func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTi
 		<-done
 		t.Log("gracefully shut down")
 	})
-	return NewServer(coordinator, members)
+
+	require.NoError(t, clk.Init())
+	return NewServer(coordinator, members, clk)
 }
 
 func collectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Event {

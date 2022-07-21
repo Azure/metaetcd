@@ -20,7 +20,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/Azure/metaetcd/internal/scheme"
 	"github.com/Azure/metaetcd/internal/watch"
 )
 
@@ -93,23 +92,10 @@ type CoordinatorClientSet struct {
 	ClockReconstitutionLock *concurrency.Mutex
 }
 
-// InitCoordinator creates a CoordinatorClientSet and initializes the clock if it hasn't been already.
-// This is important to avoid attempting to reconstitute the clock during bootstrapping of new clusters.
 func InitCoordinator(gc *GrpcContext, endpointURL string) (*CoordinatorClientSet, error) {
 	cs, err := NewClientSet(gc, endpointURL)
 	if err != nil {
 		return nil, err
-	}
-
-	ctx, done := context.WithTimeout(context.Background(), time.Second*15)
-	defer done()
-
-	_, err = cs.ClientV3.KV.Txn(ctx).
-		If(clientv3.Compare(clientv3.Version(scheme.MetaKey), "=", 0)).
-		Then(clientv3.OpPut(scheme.MetaKey, string(make([]byte, 8)))).
-		Commit()
-	if err != nil {
-		return nil, fmt.Errorf("initializing clock: %w", err)
 	}
 
 	sess, err := concurrency.NewSession(cs.ClientV3)

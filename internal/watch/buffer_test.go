@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,19 +87,19 @@ func TestBufferOrdering(t *testing.T) {
 func TestBufferKeyFiltering(t *testing.T) {
 	b := newBuffer(time.Millisecond*10, 10, nil)
 
-	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
+	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 1,
 		Key:         []byte("foo/1"),
 	}}})
-	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
+	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 2,
 		Key:         []byte("bar/2"),
 	}}})
-	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
+	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 3,
 		Key:         []byte("bar/3"),
 	}}})
-	b.Push([]*clientv3.Event{{Kv: &mvccpb.KeyValue{
+	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
 		ModRevision: 4,
 		Key:         []byte("foo/4"),
 	}}})
@@ -138,8 +137,8 @@ func TestBufferTrimWhenGap(t *testing.T) {
 	assert.Equal(t, 2, b.list.Len())
 }
 
-func eventWithModRev(rev int64) []*clientv3.Event {
-	return []*clientv3.Event{{Kv: &mvccpb.KeyValue{Key: []byte("foo/test"), ModRevision: rev}}}
+func eventWithModRev(rev int64) []*mvccpb.Event {
+	return []*mvccpb.Event{{Kv: &mvccpb.KeyValue{Key: []byte("foo/test"), ModRevision: rev}}}
 }
 
 var defaultKeyRange = adt.NewStringAffineInterval("foo", "foo0")
