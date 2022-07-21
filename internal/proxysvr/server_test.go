@@ -236,7 +236,7 @@ func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
 		lis.Close()
 	})
 
-	svr := newServer(t, coordinatoorURL, []string{member1URL, member2URL}, &membership.SharedClientContext{}, time.Second*5)
+	svr := newServer(t, coordinatoorURL, []string{member1URL, member2URL}, time.Second*5)
 	grpcServer := grpc.NewServer()
 	etcdserverpb.RegisterKVServer(grpcServer, svr)
 	etcdserverpb.RegisterWatchServer(grpcServer, svr)
@@ -250,16 +250,17 @@ func startServer(t testing.TB) (proxy, coord *clientv3.Client) {
 	return client, svr.(*server).coordinator.ClientV3
 }
 
-func newServer(t testing.TB, coordinatorURL string, memberURLs []string, scc *membership.SharedClientContext, watchTimeout time.Duration) Server {
-	coordinator, err := membership.InitCoordinator(scc, coordinatorURL)
+func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTimeout time.Duration) Server {
+	gc := &membership.GrpcContext{}
+	coordinator, err := membership.InitCoordinator(gc, coordinatorURL)
 	require.NoError(t, err)
 
 	watchMux := watch.NewMux(time.Second, 200)
-	members := membership.NewPool(scc, watchMux)
+	members := membership.NewPool(gc, watchMux)
 
 	partitions := membership.NewStaticPartitions(len(memberURLs))
 	for i, memberURL := range memberURLs {
-		err = members.AddMember(membership.ClientID(i), memberURL, partitions[i])
+		err = members.AddMember(membership.MemberID(i), memberURL, partitions[i])
 		require.NoError(t, err)
 	}
 

@@ -34,6 +34,7 @@ func init() {
 	})
 }
 
+// ClientSet holds various clients used to access etcd.
 type ClientSet struct {
 	ClientV3    *clientv3.Client
 	KV          etcdserverpb.KVClient
@@ -42,13 +43,13 @@ type ClientSet struct {
 	WatchStatus *watch.Status
 }
 
-func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, error) {
+func NewClientSet(gc *GrpcContext, endpointURL string) (*ClientSet, error) {
 	cs := &ClientSet{}
 	var err error
 	cs.ClientV3, err = clientv3.New(clientv3.Config{
 		Endpoints:   []string{endpointURL},
 		DialTimeout: 5 * time.Second,
-		TLS:         scc.TLS,
+		TLS:         gc.TLS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("constructing etcd client: %w", err)
@@ -58,10 +59,10 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 	defer cancel()
 
 	var authOption grpc.DialOption
-	if scc.TLS == nil {
+	if gc.TLS == nil {
 		authOption = grpc.WithInsecure()
 	} else {
-		authOption = grpc.WithTransportCredentials(credentials.NewBundle(credentials.Config{TLSConfig: scc.TLS}).TransportCredentials())
+		authOption = grpc.WithTransportCredentials(credentials.NewBundle(credentials.Config{TLSConfig: gc.TLS}).TransportCredentials())
 	}
 
 	u, err := url.Parse(endpointURL)
@@ -72,8 +73,8 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 	cs.GRPC, err = grpc.DialContext(ctx, u.Host,
 		grpc.WithBalancerName(etcdRoundRobinBalancerName),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:    scc.GrpcKeepaliveInterval,
-			Timeout: scc.GrpcKeepaliveTimeout,
+			Time:    gc.GrpcKeepaliveInterval,
+			Timeout: gc.GrpcKeepaliveTimeout,
 		}),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32)),
 		authOption)
@@ -86,13 +87,16 @@ func NewClientSet(scc *SharedClientContext, endpointURL string) (*ClientSet, err
 	return cs, nil
 }
 
+// CoordinatorClientSet is ClientSet plus extra fields that only pertain to coordinator clusters.
 type CoordinatorClientSet struct {
 	*ClientSet
 	ClockReconstitutionLock *concurrency.Mutex
 }
 
-func InitCoordinator(scc *SharedClientContext, endpointURL string) (*CoordinatorClientSet, error) {
-	cs, err := NewClientSet(scc, endpointURL)
+// InitCoordinator creates a CoordinatorClientSet and initializes the clock if it hasn't been already.
+// This is important to avoid attempting to reconstitute the clock during bootstrapping of new clusters.
+func InitCoordinator(gc *GrpcContext, endpointURL string) (*CoordinatorClientSet, error) {
+	cs, err := NewClientSet(gc, endpointURL)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +116,6 @@ func InitCoordinator(scc *SharedClientContext, endpointURL string) (*Coordinator
 	if err != nil {
 		return nil, fmt.Errorf("initializing etcd concurrency session: %w", err)
 	}
-	// TODO: sess.Close?
 
 	return &CoordinatorClientSet{
 		ClientSet:               cs,
@@ -120,13 +123,14 @@ func InitCoordinator(scc *SharedClientContext, endpointURL string) (*Coordinator
 	}, nil
 }
 
-type SharedClientContext struct {
+// GrpcContext contains common values used to set up gRPC connections across the fleet of clusters.
+type GrpcContext struct {
 	GrpcKeepaliveInterval time.Duration
 	GrpcKeepaliveTimeout  time.Duration
 	TLS                   *tls.Config
 }
 
-func (s *SharedClientContext) LoadPKI(clientCert, clientKey, caCert string) error {
+func (g *GrpcContext) LoadPKI(clientCert, clientKey, caCert string) error {
 	if clientCert == "" {
 		return nil
 	}
@@ -144,7 +148,7 @@ func (s *SharedClientContext) LoadPKI(clientCert, clientKey, caCert string) erro
 		return fmt.Errorf("ca cert is invalid")
 	}
 
-	s.TLS = &tls.Config{
+	g.TLS = &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		RootCAs:      cas,
 	}

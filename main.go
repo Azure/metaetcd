@@ -41,7 +41,7 @@ func main() {
 		grpcSvrKeepaliveMaxIdle  time.Duration
 		grpcSvrKeepaliveInterval time.Duration
 		grpcSvrKeepaliveTimeout  time.Duration
-		scc                      membership.SharedClientContext
+		grpcContext              membership.GrpcContext
 	)
 	flag.StringVar(&listenAddr, "listen-addr", ":2379", "")
 	flag.StringVar(&coordinator, "coordinator", "", "")
@@ -59,8 +59,8 @@ func main() {
 	flag.DurationVar(&grpcSvrKeepaliveMaxIdle, "grpc-server-keepalive-max-idle", time.Second*5, "")
 	flag.DurationVar(&grpcSvrKeepaliveInterval, "grpc-server-keepalive-interval", time.Second*10, "")
 	flag.DurationVar(&grpcSvrKeepaliveTimeout, "grpc-server-keepalive-timeout", time.Second*20, "")
-	flag.DurationVar(&scc.GrpcKeepaliveInterval, "grpc-client-keepalive-interval", time.Second*5, "")
-	flag.DurationVar(&scc.GrpcKeepaliveTimeout, "grpc-client-keepalive-timeout", time.Second*20, "")
+	flag.DurationVar(&grpcContext.GrpcKeepaliveInterval, "grpc-client-keepalive-interval", time.Second*5, "")
+	flag.DurationVar(&grpcContext.GrpcKeepaliveTimeout, "grpc-client-keepalive-timeout", time.Second*20, "")
 	flag.Parse()
 
 	logCfg := zap.NewProductionConfig()
@@ -80,7 +80,7 @@ func main() {
 		zap.L().Sugar().Panicf("failed to start listener: %s", err)
 	}
 
-	if err := scc.LoadPKI(clientCertPath, clientCertKeyPath, caPath); err != nil {
+	if err := grpcContext.LoadPKI(clientCertPath, clientCertKeyPath, caPath); err != nil {
 		zap.L().Sugar().Panicf("failed to load shared client context: %s", err)
 	}
 
@@ -98,16 +98,16 @@ func main() {
 		}()
 	}
 
-	coordClient, err := membership.InitCoordinator(&scc, coordinator)
+	coordClient, err := membership.InitCoordinator(&grpcContext, coordinator)
 	if err != nil {
 		zap.L().Sugar().Panicf("failed to create client for coordinator cluster: %s", err)
 	}
 
 	watchMux := watch.NewMux(watchTimeout, watchBufferLen)
-	pool := membership.NewPool(&scc, watchMux)
+	pool := membership.NewPool(&grpcContext, watchMux)
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {
-		err = pool.AddMember(membership.ClientID(i), memberURL, partitions[i])
+		err = pool.AddMember(membership.MemberID(i), memberURL, partitions[i])
 		if err != nil {
 			zap.L().Sugar().Panicf("failed to add member %q to the pool: %s", memberURL, err)
 		}

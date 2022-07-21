@@ -7,37 +7,43 @@ import (
 	"io"
 	"sync"
 
-	"github.com/Azure/metaetcd/internal/watch"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/Azure/metaetcd/internal/watch"
 )
 
+// partitionCount is the number of partitions in meta cluster's keyspace.
+// It's hardcoded to avoid mismatched values across instances of this process.
 const partitionCount = 16
 
+// PartitionID references one of the partitions implied by partitionCount.
 type PartitionID int8
 
-type ClientID int64
+// MemberID is a monotonic ID. As members are added, this can only go up.
+type MemberID int64
 
+// Pool is a dynamic set of etcd clients, responsible for their entire lifecycle.
 type Pool struct {
-	WatchMux *watch.Mux
+	WatchMux    *watch.Mux
+	grpcContext *GrpcContext
 
-	mut                  sync.RWMutex
-	clients              []*ClientSet
-	clientsByClientID    map[ClientID]*ClientSet
-	clientsByPartitionID map[PartitionID]*ClientSet
-	scc                  *SharedClientContext
+	mut           sync.RWMutex
+	clients       []*ClientSet
+	byMemberID    map[MemberID]*ClientSet
+	byPartitionID map[PartitionID]*ClientSet
 }
 
-func NewPool(scc *SharedClientContext, WatchMux *watch.Mux) *Pool {
+func NewPool(gc *GrpcContext, wm *watch.Mux) *Pool {
 	return &Pool{
-		clientsByClientID:    make(map[ClientID]*ClientSet),
-		clientsByPartitionID: make(map[PartitionID]*ClientSet),
-		scc:                  scc,
-		WatchMux:             WatchMux,
+		WatchMux:      wm,
+		grpcContext:   gc,
+		byMemberID:    make(map[MemberID]*ClientSet),
+		byPartitionID: make(map[PartitionID]*ClientSet),
 	}
 }
 
-func (p *Pool) AddMember(id ClientID, endpointURL string, partitions []PartitionID) error {
-	clientset, err := NewClientSet(p.scc, endpointURL)
+func (p *Pool) AddMember(id MemberID, endpointURL string, partitions []PartitionID) error {
+	clientset, err := NewClientSet(p.grpcContext, endpointURL)
 	if err != nil {
 		return fmt.Errorf("constructing clientset: %w", err)
 	}
@@ -51,9 +57,9 @@ func (p *Pool) AddMember(id ClientID, endpointURL string, partitions []Partition
 	defer p.mut.Unlock()
 
 	p.clients = append(p.clients, clientset)
-	p.clientsByClientID[id] = clientset
+	p.byMemberID[id] = clientset
 	for _, pid := range partitions {
-		p.clientsByPartitionID[pid] = clientset
+		p.byPartitionID[pid] = clientset
 	}
 
 	return nil
@@ -71,10 +77,6 @@ func (p *Pool) IterateMembers(ctx context.Context, fn func(context.Context, *Cli
 }
 
 func (p *Pool) GetMemberForKey(key string) *ClientSet {
-	if len(p.clients) == 0 {
-		return nil
-	}
-
 	h := fnv.New64()
 	if _, err := io.WriteString(h, key); err != nil {
 		panic(err) // impossible
@@ -92,13 +94,15 @@ func (p *Pool) GetMemberForKey(key string) *ClientSet {
 	p.mut.RLock()
 	defer p.mut.RUnlock()
 
-	client, ok := p.clientsByPartitionID[PartitionID(b)]
-	if !ok {
-		panic(fmt.Sprintf("client not found for partition ID %d", b)) // unlikely
+	if len(p.clients) == 0 {
+		return nil
 	}
-	return client
+
+	return p.byPartitionID[PartitionID(b)]
 }
 
+// NewStaticPartitions naively assigns partitions to a static number of members.
+// Useful when not using a dynamic means of assignment (testing, static clusters, etc.)
 func NewStaticPartitions(memberCount int) [][]PartitionID {
 	ids := make([][]PartitionID, memberCount)
 	cursor := 0
