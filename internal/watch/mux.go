@@ -17,7 +17,7 @@ type EventTransformer interface {
 }
 
 type Mux struct {
-	buffer      *buffer
+	buffer      *buffer[*eventWrapper]
 	ch          chan *eventWrapper
 	tree        *groupTree[*mvccpb.Event]
 	transformer EventTransformer
@@ -119,7 +119,7 @@ func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, c
 			return nil, lowerBound
 		}
 		for _, event := range events {
-			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event}}
+			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event.Event}}
 			if event.Kv.ModRevision > startingRev {
 				startingRev = event.Kv.ModRevision
 			}

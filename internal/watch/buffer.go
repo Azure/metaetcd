@@ -11,21 +11,27 @@ import (
 	"go.uber.org/zap"
 )
 
-type buffer struct {
+type bufferableEvent interface {
+	GetAge() time.Duration
+	GetModRev() int64
+	GetKey() *adt.Interval
+}
+
+type buffer[T bufferableEvent] struct {
 	mut                    sync.Mutex
 	list                   *list.List
 	gapTimeout             time.Duration
 	maxLen                 int
 	lowerBound, upperBound int64
 	upperVal               *list.Element
-	ch                     chan<- *eventWrapper
+	ch                     chan<- T
 }
 
-func newBuffer(gapTimeout time.Duration, maxLen int, ch chan<- *eventWrapper) *buffer {
-	return &buffer{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
+func newBuffer[T bufferableEvent](gapTimeout time.Duration, maxLen int, ch chan<- T) *buffer[T] {
+	return &buffer[T]{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
 }
 
-func (b *buffer) Run(ctx context.Context) {
+func (b *buffer[T]) Run(ctx context.Context) {
 	ticker := time.NewTicker(b.gapTimeout)
 	defer ticker.Stop()
 	for {
@@ -38,7 +44,7 @@ func (b *buffer) Run(ctx context.Context) {
 	}
 }
 
-func (b *buffer) Push(event *eventWrapper) {
+func (b *buffer[T]) Push(event T) {
 	watchEventCount.Inc()
 	b.mut.Lock()
 	defer b.mut.Unlock()
@@ -47,7 +53,7 @@ func (b *buffer) Push(event *eventWrapper) {
 	b.bridgeGapUnlocked()
 }
 
-func (b *buffer) pushUnlocked(event *eventWrapper) {
+func (b *buffer[T]) pushUnlocked(event T) {
 	watchBufferLength.Inc()
 	lastEl := b.list.Back()
 
@@ -58,15 +64,15 @@ func (b *buffer) pushUnlocked(event *eventWrapper) {
 	}
 
 	// Case 2: outside of range - insert before or after
-	last := lastEl.Value.(*eventWrapper)
-	if event.Kv.ModRevision > last.Kv.ModRevision {
+	last := lastEl.Value.(T)
+	if event.GetModRev() > last.GetModRev() {
 		b.list.PushBack(event)
 		return
 	}
 
 	firstEl := b.list.Front()
-	first := firstEl.Value.(*eventWrapper)
-	if event.Kv.ModRevision < first.Kv.ModRevision {
+	first := firstEl.Value.(T)
+	if event.GetModRev() < first.GetModRev() {
 		b.list.PushFront(event)
 		return
 	}
@@ -77,9 +83,9 @@ func (b *buffer) pushUnlocked(event *eventWrapper) {
 		if firstEl == nil {
 			break
 		}
-		first = firstEl.Value.(*eventWrapper)
+		first = firstEl.Value.(T)
 
-		if event.Kv.ModRevision > first.Kv.ModRevision {
+		if event.GetModRev() > first.GetModRev() {
 			b.list.InsertAfter(event, firstEl)
 			return
 		}
@@ -87,54 +93,54 @@ func (b *buffer) pushUnlocked(event *eventWrapper) {
 	}
 }
 
-func (b *buffer) trimUnlocked() {
+func (b *buffer[T]) trimUnlocked() {
 	item := b.list.Front()
 	for {
 		if b.list.Len() <= b.maxLen || item == nil {
 			return
 		}
-		event := item.Value.(*eventWrapper)
+		event := item.Value.(T)
 
 		next := item.Next()
-		if b.upperBound > event.Kv.ModRevision {
+		if b.upperBound > event.GetModRev() {
 			watchBufferLength.Dec()
 			b.list.Remove(item)
 		}
 		if next != nil {
-			newFront := next.Value.(*eventWrapper)
-			b.lowerBound = newFront.Kv.ModRevision
+			newFront := next.Value.(T)
+			b.lowerBound = newFront.GetModRev()
 		}
 		item = next
 	}
 }
 
-func (b *buffer) Range(start int64, ivl adt.Interval) ([]*mvccpb.Event, int64, int64) {
+func (b *buffer[T]) Range(start int64, ivl adt.Interval) ([]T, int64, int64) {
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	slice := []*mvccpb.Event{}
+	slice := []T{}
 	pos := b.list.Front()
 	for {
 		if pos == nil {
 			break
 		}
-		e := pos.Value.(*eventWrapper)
-		if e.Kv.ModRevision <= start {
+		e := pos.Value.(T)
+		if e.GetModRev() <= start {
 			pos = pos.Next()
 			continue
 		}
-		if e.Kv.ModRevision > b.upperBound {
+		if e.GetModRev() > b.upperBound {
 			break
 		}
-		if ivl.Compare(&e.Key) == 0 {
-			slice = append(slice, e.Event)
+		if ivl.Compare(e.GetKey()) == 0 {
+			slice = append(slice, e)
 		}
 		pos = pos.Next()
 	}
 	return slice, b.lowerBound, b.upperBound
 }
 
-func (b *buffer) bridgeGapUnlocked() {
+func (b *buffer[T]) bridgeGapUnlocked() {
 	val := b.upperVal
 	if val == nil {
 		val = b.list.Front()
@@ -143,18 +149,18 @@ func (b *buffer) bridgeGapUnlocked() {
 		if val == nil || val.Value == nil {
 			break
 		}
-		valE := val.Value.(*eventWrapper)
+		valE := val.Value.(T)
 
-		if valE.Kv.ModRevision <= b.upperBound {
+		if valE.GetModRev() <= b.upperBound {
 			val = val.Next()
 			continue // this gap has already been closed
 		}
 
-		isNextEvent := valE.Kv.ModRevision == b.upperBound+1
-		age := time.Since(valE.Timestamp)
+		isNextEvent := valE.GetModRev() == b.upperBound+1
+		age := valE.GetAge()
 		hasTimedout := age > b.gapTimeout
 		if hasTimedout && !isNextEvent {
-			zap.L().Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.Kv.ModRevision))
+			zap.L().Warn("filled gap in watch stream", zap.Int64("from", b.upperBound), zap.Int64("to", valE.GetModRev()))
 			watchGapTimeoutCount.Inc()
 		}
 		if !isNextEvent && !hasTimedout {
@@ -164,10 +170,10 @@ func (b *buffer) bridgeGapUnlocked() {
 		if b.ch != nil {
 			b.ch <- valE
 		}
-		b.upperBound = valE.Kv.ModRevision
+		b.upperBound = valE.GetModRev()
 		b.upperVal = val
 		if b.lowerBound == -1 {
-			b.lowerBound = valE.Kv.ModRevision
+			b.lowerBound = valE.GetModRev()
 		}
 
 		currentWatchRev.Set(float64(b.upperBound))
@@ -185,3 +191,7 @@ type eventWrapper struct {
 	Key       adt.Interval
 	Timestamp time.Time
 }
+
+func (e *eventWrapper) GetAge() time.Duration { return time.Since(e.Timestamp) }
+func (e *eventWrapper) GetModRev() int64      { return e.Kv.ModRevision }
+func (e *eventWrapper) GetKey() *adt.Interval { return &e.Key } // TODO: Remove

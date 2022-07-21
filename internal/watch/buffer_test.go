@@ -8,8 +8,6 @@ import (
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/pkg/v3/adt"
-
-	"github.com/Azure/metaetcd/internal/testutil"
 )
 
 func TestBufferOrdering(t *testing.T) {
@@ -40,7 +38,7 @@ func TestBufferOrdering(t *testing.T) {
 	buf, lb, up = b.Range(0, defaultKeyRange)
 	assert.Equal(t, int64(2), lb)
 	assert.Equal(t, int64(2), up)
-	assert.Equal(t, []int64{2}, testutil.EventModRevs(buf))
+	assert.Equal(t, []int64{2}, eventModRevs(buf))
 
 	// Fill the gap
 	b.Push(eventWithModRev(3))
@@ -49,13 +47,13 @@ func TestBufferOrdering(t *testing.T) {
 	buf, lb, up = b.Range(0, defaultKeyRange)
 	assert.Equal(t, int64(2), lb)
 	assert.Equal(t, int64(4), up)
-	assert.Equal(t, []int64{2, 3, 4}, testutil.EventModRevs(buf))
+	assert.Equal(t, []int64{2, 3, 4}, eventModRevs(buf))
 
 	// Partial range
 	buf, lb, up = b.Range(2, defaultKeyRange)
 	assert.Equal(t, int64(2), lb)
 	assert.Equal(t, int64(4), up)
-	assert.Equal(t, []int64{3, 4}, testutil.EventModRevs(buf))
+	assert.Equal(t, []int64{3, 4}, eventModRevs(buf))
 
 	// Push event to create another gap
 	b.Push(eventWithModRev(6))
@@ -70,21 +68,21 @@ func TestBufferOrdering(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond * 5)
 	}
-	assert.Equal(t, []int64{2, 3, 4, 6}, testutil.EventModRevs(buf))
+	assert.Equal(t, []int64{2, 3, 4, 6}, eventModRevs(buf))
 
 	// Push another event, which will cause the earliest event to fall off
 	b.Push(eventWithModRev(7))
 	buf, lb, up = b.Range(0, defaultKeyRange)
 	assert.Equal(t, int64(3), lb)
 	assert.Equal(t, int64(7), up)
-	assert.Equal(t, []int64{3, 4, 6, 7}, testutil.EventModRevs(buf))
+	assert.Equal(t, []int64{3, 4, 6, 7}, eventModRevs(buf))
 
 	cancel()
 	<-done
 }
 
 func TestBufferBridgeGap(t *testing.T) {
-	b := newBuffer(time.Second, 10, nil)
+	b := newBuffer[*eventWrapper](time.Second, 10, nil)
 
 	events := []int64{4, 3, 1, 2}
 	expectedUpperBounds := []int64{0, 0, 1, 4}
@@ -96,7 +94,7 @@ func TestBufferBridgeGap(t *testing.T) {
 }
 
 func TestBufferTrimWhenGap(t *testing.T) {
-	b := newBuffer(time.Millisecond, 2, nil)
+	b := newBuffer[*eventWrapper](time.Millisecond, 2, nil)
 
 	// Fill the buffer and more
 	const n = 10
@@ -121,3 +119,12 @@ func eventWithModRev(rev int64) *eventWrapper {
 }
 
 var defaultKeyRange = adt.NewStringAffineInterval("foo", "foo0")
+
+// TODO
+func eventModRevs(events []*eventWrapper) []int64 {
+	ret := make([]int64, len(events))
+	for i, event := range events {
+		ret[i] = event.Kv.ModRevision
+	}
+	return ret
+}
