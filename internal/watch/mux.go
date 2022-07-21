@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Azure/metaetcd/internal/util"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/etcdserver/etcdserverpb"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
+
+	"github.com/Azure/metaetcd/internal/util"
 )
 
 type EventTransformer interface {
@@ -20,7 +21,7 @@ type EventTransformer interface {
 type Mux struct {
 	buffer      *util.TimeBuffer[adt.Interval, *eventWrapper]
 	ch          chan *eventWrapper
-	tree        *groupTree[*mvccpb.Event]
+	tree        *util.GroupTree[*mvccpb.Event]
 	transformer EventTransformer
 }
 
@@ -29,7 +30,7 @@ func NewMux(gapTimeout time.Duration, bufferLen int, et EventTransformer) *Mux {
 	m := &Mux{
 		buffer:      util.NewTimeBuffer[adt.Interval](gapTimeout, bufferLen, ch),
 		ch:          ch,
-		tree:        newGroupTree[*mvccpb.Event](),
+		tree:        util.NewGroupTree[*mvccpb.Event](),
 		transformer: et,
 	}
 	return m

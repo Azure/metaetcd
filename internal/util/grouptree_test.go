@@ -1,4 +1,4 @@
-package watch
+package util
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestGroupTree(t *testing.T) {
-	g := newGroupTree[int]()
+	g := NewGroupTree[int]()
 
 	// Initial listener
 	i1 := adt.NewStringAffineInterval("foo", "foo0")

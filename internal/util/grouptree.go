@@ -1,4 +1,4 @@
-package watch
+package util
 
 import (
 	"sync"
@@ -6,18 +6,18 @@ import (
 	"go.etcd.io/etcd/pkg/v3/adt"
 )
 
-type groupTree[T any] struct {
+type GroupTree[T any] struct {
 	mut  sync.RWMutex
 	tree adt.IntervalTree
 }
 
-func newGroupTree[T any]() *groupTree[T] {
-	return &groupTree[T]{
+func NewGroupTree[T any]() *GroupTree[T] {
+	return &GroupTree[T]{
 		tree: adt.NewIntervalTree(),
 	}
 }
 
-func (g *groupTree[T]) Add(interval adt.Interval, ch chan T) {
+func (g *GroupTree[T]) Add(interval adt.Interval, ch chan T) {
 	g.mut.Lock()
 	defer g.mut.Unlock()
 
@@ -29,7 +29,7 @@ func (g *groupTree[T]) Add(interval adt.Interval, ch chan T) {
 	g.tree.Insert(interval, &watchGroup[T]{Chans: map[chan T]struct{}{ch: {}}})
 }
 
-func (g *groupTree[T]) Remove(interval adt.Interval, ch chan T) {
+func (g *GroupTree[T]) Remove(interval adt.Interval, ch chan T) {
 	g.mut.Lock()
 	defer g.mut.Unlock()
 
@@ -47,7 +47,7 @@ func (g *groupTree[T]) Remove(interval adt.Interval, ch chan T) {
 	g.tree.Delete(interval)
 }
 
-func (g *groupTree[T]) Broadcast(key adt.Interval, event T) {
+func (g *GroupTree[T]) Broadcast(key adt.Interval, event T) {
 	g.mut.RLock()
 	defer g.mut.RUnlock()
 
