@@ -82,8 +82,16 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 		if !ok {
 			continue
 		}
-		zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
-		m.buffer.Push(events)
+
+		for _, event := range events {
+			zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
+			m.buffer.Push(&eventWrapper{
+				Event:     event,
+				Timestamp: time.Now(),
+				Key:       adt.NewStringAffinePoint(string(event.Kv.Key)),
+			})
+		}
+
 	}
 }
 

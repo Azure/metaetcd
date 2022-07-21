@@ -38,43 +38,36 @@ func (b *buffer) Run(ctx context.Context) {
 	}
 }
 
-func (b *buffer) Push(events []*mvccpb.Event) {
+func (b *buffer) Push(event *eventWrapper) {
 	watchEventCount.Inc()
 	b.mut.Lock()
 	defer b.mut.Unlock()
 
-	for _, event := range events {
-		b.pushOrDeferUnlocked(event)
-	}
-}
-
-func (b *buffer) pushOrDeferUnlocked(event *mvccpb.Event) {
 	b.pushUnlocked(event)
 	b.bridgeGapUnlocked()
 }
 
-func (b *buffer) pushUnlocked(event *mvccpb.Event) {
+func (b *buffer) pushUnlocked(event *eventWrapper) {
 	watchBufferLength.Inc()
 	lastEl := b.list.Back()
-	wrapped := &eventWrapper{Event: event, Timestamp: time.Now(), Key: adt.NewStringAffinePoint(string(event.Kv.Key))}
 
 	// Case 1: first element
 	if lastEl == nil {
-		b.list.PushFront(wrapped)
+		b.list.PushFront(event)
 		return
 	}
 
 	// Case 2: outside of range - insert before or after
 	last := lastEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision > last.Kv.ModRevision {
-		b.list.PushBack(wrapped)
+		b.list.PushBack(event)
 		return
 	}
 
 	firstEl := b.list.Front()
 	first := firstEl.Value.(*eventWrapper)
 	if event.Kv.ModRevision < first.Kv.ModRevision {
-		b.list.PushFront(wrapped)
+		b.list.PushFront(event)
 		return
 	}
 
@@ -87,7 +80,7 @@ func (b *buffer) pushUnlocked(event *mvccpb.Event) {
 		first = firstEl.Value.(*eventWrapper)
 
 		if event.Kv.ModRevision > first.Kv.ModRevision {
-			b.list.InsertAfter(wrapped, firstEl)
+			b.list.InsertAfter(event, firstEl)
 			return
 		}
 		lastEl = firstEl

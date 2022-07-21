@@ -7,7 +7,6 @@ import (
 
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"go.etcd.io/etcd/pkg/v3/adt"
 
 	"github.com/Azure/metaetcd/internal/testutil"
@@ -84,31 +83,6 @@ func TestBufferOrdering(t *testing.T) {
 	<-done
 }
 
-func TestBufferKeyFiltering(t *testing.T) {
-	b := newBuffer(time.Millisecond*10, 10, nil)
-
-	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
-		ModRevision: 1,
-		Key:         []byte("foo/1"),
-	}}})
-	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
-		ModRevision: 2,
-		Key:         []byte("bar/2"),
-	}}})
-	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
-		ModRevision: 3,
-		Key:         []byte("bar/3"),
-	}}})
-	b.Push([]*mvccpb.Event{{Kv: &mvccpb.KeyValue{
-		ModRevision: 4,
-		Key:         []byte("foo/4"),
-	}}})
-
-	slice, _, _ := b.Range(0, adt.NewStringAffineInterval("bar", "bar0"))
-	require.Len(t, slice, 2)
-	assert.Equal(t, []int64{2, 3}, testutil.EventModRevs(slice))
-}
-
 func TestBufferBridgeGap(t *testing.T) {
 	b := newBuffer(time.Second, 10, nil)
 
@@ -137,8 +111,13 @@ func TestBufferTrimWhenGap(t *testing.T) {
 	assert.Equal(t, 2, b.list.Len())
 }
 
-func eventWithModRev(rev int64) []*mvccpb.Event {
-	return []*mvccpb.Event{{Kv: &mvccpb.KeyValue{Key: []byte("foo/test"), ModRevision: rev}}}
+func eventWithModRev(rev int64) *eventWrapper {
+	key := "foo/test"
+	return &eventWrapper{
+		Event:     &mvccpb.Event{Kv: &mvccpb.KeyValue{Key: []byte(key), ModRevision: rev}},
+		Timestamp: time.Now(),
+		Key:       adt.NewStringAffinePoint(key),
+	}
 }
 
 var defaultKeyRange = adt.NewStringAffineInterval("foo", "foo0")
