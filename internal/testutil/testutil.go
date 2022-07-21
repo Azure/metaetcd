@@ -65,10 +65,14 @@ func EventKeys(events []*mvccpb.Event) []string {
 	return ret
 }
 
-func EventModRevs(events []*mvccpb.Event) []int64 {
+type TimestampedEvent interface {
+	GetModRev() int64
+}
+
+func EventModRevs[T TimestampedEvent](events []T) []int64 {
 	ret := make([]int64, len(events))
 	for i, event := range events {
-		ret[i] = event.Kv.ModRevision
+		ret[i] = event.GetModRev()
 	}
 	return ret
 }
