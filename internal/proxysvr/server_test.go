@@ -27,7 +27,6 @@ func TestIntegrationBulk(t *testing.T) {
 	var lastSeenMetaRev int64
 	client, coord := startServer(t)
 
-	// Start watches to observe the test operations
 	watchCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV())
@@ -61,6 +60,13 @@ func TestIntegrationBulk(t *testing.T) {
 		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(lastSeenMetaRev-15))
 		collectEvents(t, watch, 16)
 	})
+
+	t.Run("watch from too old of rev", func(t *testing.T) {
+		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(-2))
+		event := <-watch
+		assert.EqualError(t, event.Err(), "etcdserver: mvcc: required revision has been compacted")
+	})
+
 	cancel()
 
 	t.Run("get", func(t *testing.T) {

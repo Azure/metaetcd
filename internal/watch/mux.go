@@ -85,9 +85,9 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 	}
 }
 
-func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *etcdserverpb.WatchResponse) bool {
+func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, ch chan<- *etcdserverpb.WatchResponse) (func(), int64) {
 	eventCh := make(chan *mvccpb.Event, 2000) // TODO: Make this tunable
-	i := adt.NewStringAffineInterval(string(key), string(end))
+	i := adt.NewStringAffineInterval(string(req.Key), string(req.RangeEnd))
 
 	// Start listening for new events
 	var chanStartRev int64
@@ -97,22 +97,24 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 		m.tree.Add(i, eventCh)
 		chanStartRev = m.buffer.upperBound
 	}()
-	defer m.tree.Remove(i, eventCh)
+
+	ch <- &etcdserverpb.WatchResponse{WatchId: req.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
 
 	// Backfill old events
 	var startingRev int64
 	for j := 0; true; j++ {
 		events, lowerBound, upperBound := m.buffer.Range(startingRev, i)
-		if j == 0 && lowerBound > rev {
-			zap.L().Warn("attempted to start watch before buffer", zap.Int64("lowerBound", lowerBound), zap.Int64("rev", rev))
+		if j == 0 && lowerBound > req.StartRevision {
 			staleWatchCount.Inc()
-			return false
+			return nil, lowerBound
 		}
 		for _, event := range events {
-			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
+			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event}}
+			if event.Kv.ModRevision > startingRev {
+				startingRev = event.Kv.ModRevision
+			}
 		}
-		startingRev = upperBound
-		if upperBound > chanStartRev {
+		if upperBound >= chanStartRev {
 			break
 		}
 		time.Sleep(time.Millisecond * 100)
@@ -120,17 +122,22 @@ func (m *Mux) Watch(ctx context.Context, key, end []byte, rev int64, ch chan<- *
 
 	go func() {
 		<-ctx.Done()
-		defer close(eventCh)
+		m.tree.Remove(i, eventCh)
+		close(eventCh)
 	}()
 
 	// Map the event channel into the watch response channel
-	for event := range eventCh {
-		if event.Kv.ModRevision < startingRev {
-			continue
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for event := range eventCh {
+			if event.Kv.ModRevision < startingRev {
+				continue
+			}
+			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event}}
 		}
-		ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, Events: []*mvccpb.Event{event}}
-	}
-	return true
+	}()
+	return func() { <-done }, 0
 }
 
 type Status struct {

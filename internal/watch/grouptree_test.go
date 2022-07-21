@@ -21,7 +21,7 @@ func TestGroupTree(t *testing.T) {
 	g.Add(i2, ch2)
 
 	// Overlapping
-	i3 := adt.NewStringAffineInterval("foo", "foo9") // TODO
+	i3 := adt.NewStringAffineInterval("foo", "foo9")
 	ch3 := make(chan int, 10)
 	g.Add(i3, ch3)
 

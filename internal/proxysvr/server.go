@@ -29,8 +29,6 @@ import (
 	"github.com/Azure/metaetcd/internal/scheme"
 )
 
-// TODO: Use per-member circuit breakers to avoid orphaned clock ticks and the watch latency they cause
-
 type Server interface {
 	etcdserverpb.KVServer
 	etcdserverpb.WatchServer
@@ -168,12 +166,13 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 	activeWatchCount.Inc()
 	defer activeWatchCount.Dec()
 
-	wg, _ := errgroup.WithContext(srv.Context())
-	ch := make(chan *etcdserverpb.WatchResponse)
+	wg, ctx := errgroup.WithContext(srv.Context())
 	id := uuid.Must(uuid.NewRandom()).String()
 	zap.L().Info("starting watch connection", zap.String("watchID", id))
 
+	ch := make(chan *etcdserverpb.WatchResponse)
 	wg.Go(func() error {
+		defer close(ch)
 		for {
 			msg, err := srv.Recv()
 			if err != nil {
@@ -181,19 +180,21 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 			}
 			if r := msg.GetCreateRequest(); r != nil {
 				if r.StartRevision == 0 {
-					r.StartRevision, err = s.now(srv.Context())
+					r.StartRevision, err = s.now(ctx)
 					if err != nil {
 						return err
 					}
 				}
+				future, lowerBound := s.members.WatchMux.Watch(ctx, r, ch)
+				if future == nil {
+					zap.L().Warn("attempted to start watch before buffer", zap.String("watchID", id), zap.Int64("currentLowerBound", lowerBound), zap.Int64("metaRev", r.StartRevision))
+					return rpctypes.ErrGRPCCompacted
+				}
+				zap.L().Info("added keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
 				wg.Go(func() error {
-					zap.L().Info("adding keyspace to watch connection", zap.String("watchID", id), zap.String("start", string(r.Key)), zap.String("end", string(r.RangeEnd)), zap.Int64("metaRev", r.StartRevision))
-					if !s.members.WatchMux.Watch(srv.Context(), r.Key, r.RangeEnd, r.StartRevision, ch) {
-						return fmt.Errorf("starting rev is too old")
-					}
+					future()
 					return nil
 				})
-				ch <- &etcdserverpb.WatchResponse{WatchId: r.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
 			}
 			// TODO: Handle other types of incoming requests
 		}
@@ -210,6 +211,7 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 
 	if err := wg.Wait(); err != nil {
 		zap.L().Warn("closing watch connection with error", zap.String("watchID", id), zap.Error(err))
+		return err
 	}
 	zap.L().Info("closing watch connection", zap.String("watchID", id))
 	return nil

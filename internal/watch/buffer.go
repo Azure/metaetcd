@@ -10,9 +10,9 @@ import (
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/v3/adt"
 	"go.uber.org/zap"
-)
 
-// TODO: Consider watching only the metakey instead of maintaining event buffer for entire keyspace
+	"github.com/Azure/metaetcd/internal/scheme"
+)
 
 type buffer struct {
 	mut                    sync.Mutex
@@ -45,7 +45,16 @@ func (b *buffer) Push(events []*clientv3.Event) {
 	watchEventCount.Inc()
 	b.mut.Lock()
 	defer b.mut.Unlock()
+
+	if len(events) == 1 { // only the meta event
+		e := mvccpb.Event(*events[0])
+		b.pushOrDeferUnlocked(&e)
+		return
+	}
 	for _, event := range events {
+		if string(event.Kv.Key) == scheme.MetaKey {
+			continue
+		}
 		e := mvccpb.Event(*event)
 		b.pushOrDeferUnlocked(&e)
 	}
