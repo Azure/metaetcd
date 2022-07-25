@@ -24,7 +24,7 @@ var ctx = context.Background()
 
 func TestIntegrationBulk(t *testing.T) {
 	n := 100
-	var lastSeenMetaRev int64
+	var latestRev int64
 	client, s := startServer(t)
 
 	watchCtx, cancel := context.WithCancel(context.Background())
@@ -39,26 +39,29 @@ func TestIntegrationBulk(t *testing.T) {
 
 			resp, err := client.Txn(ctx).Then(clientv3.OpPut(key, value)).Commit()
 			require.NoError(t, err)
-			lastSeenMetaRev = resp.Header.Revision
-			creationRevs[key] = lastSeenMetaRev // used to assert on mod rev later
-			assert.Equal(t, int64(i+2), lastSeenMetaRev, "n is zero-indexed, meta rev initializes to one, first write is two")
+			latestRev = resp.Header.Revision
+			creationRevs[key] = latestRev // used to assert on mod rev later
+			assert.Equal(t, int64(i+2), latestRev, "n is zero-indexed, meta rev initializes to one, first write is two")
 
 			// Delete the last value
 			if i == n {
 				resp, err := client.Txn(ctx).Then(clientv3.OpDelete(fmt.Sprintf("key-%d", i-1))).Commit()
 				require.NoError(t, err)
-				lastSeenMetaRev = resp.Header.Revision
+				latestRev = resp.Header.Revision
 			}
 		}
 	})
 
 	t.Run("watch", func(t *testing.T) {
-		testutil.CollectEvents(t, watch, 100)
+		events := testutil.CollectEvents(t, watch, 100)
+		assert.Equal(t, testutil.NewSeq(2, int64(n+2)), testutil.GetEventRevisions(events))
 	})
 
 	t.Run("watch from rev", func(t *testing.T) {
-		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(lastSeenMetaRev-15))
-		testutil.CollectEvents(t, watch, 16)
+		startRev := latestRev - 50
+		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(startRev))
+		events := testutil.CollectEvents(t, watch, 16)
+		assert.Equal(t, testutil.NewSeq(startRev+1, startRev+17), testutil.GetEventRevisions(events))
 	})
 
 	t.Run("watch from too old of rev", func(t *testing.T) {
@@ -80,7 +83,7 @@ func TestIntegrationBulk(t *testing.T) {
 			assert.Equal(t, key, string(getResp.Kvs[0].Key), "key matches")
 			assert.Equal(t, value, string(getResp.Kvs[0].Value), "value matches")
 			assert.Equal(t, creationRevs[key], getResp.Kvs[0].ModRevision, "mod rev matches meta cluster rev at the time the key was last written")
-			assert.Equal(t, lastSeenMetaRev, getResp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
+			assert.Equal(t, latestRev, getResp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 		}
 	})
 
@@ -90,7 +93,7 @@ func TestIntegrationBulk(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, resp.Kvs, n)
 			assert.Equal(t, int64(n), resp.Count)
-			assert.Equal(t, lastSeenMetaRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
+			assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 
 			for i := 0; i < n; i++ {
 				assert.Equal(t, creationRevs[string(resp.Kvs[i].Key)], resp.Kvs[i].ModRevision, "mod rev matches meta cluster rev at the time the key was last written")
@@ -102,7 +105,7 @@ func TestIntegrationBulk(t *testing.T) {
 	t.Run("range with limit", func(t *testing.T) {
 		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithLimit(11))
 		require.NoError(t, err)
-		assert.Equal(t, lastSeenMetaRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
+		assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 		assert.Len(t, resp.Kvs, 11)
 		assert.Equal(t, int64(n), resp.Count)
 	})
@@ -134,7 +137,7 @@ func TestIntegrationBulk(t *testing.T) {
 	t.Run("range with count", func(t *testing.T) {
 		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithCountOnly())
 		require.NoError(t, err)
-		assert.Equal(t, lastSeenMetaRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
+		assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
 		assert.Len(t, resp.Kvs, 0)
 		assert.Equal(t, int64(n), resp.Count)
 	})
@@ -161,7 +164,7 @@ func TestIntegrationBulk(t *testing.T) {
 	t.Run("update single key", func(t *testing.T) {
 		txnResp, err := client.Txn(ctx).Then(clientv3.OpPut("key-1", "new-value")).Commit()
 		require.NoError(t, err)
-		lastSeenMetaRev = txnResp.Header.Revision
+		latestRev = txnResp.Header.Revision
 
 		resp, err := client.Get(ctx, "key-1")
 		require.NoError(t, err)
@@ -177,7 +180,7 @@ func TestIntegrationBulk(t *testing.T) {
 			Then(clientv3.OpPut("key-1", "new-value-2")).Commit()
 		require.NoError(t, err)
 		assert.Equal(t, txnResp.Header.Revision, txnResp.Responses[0].GetResponsePut().Header.Revision)
-		lastSeenMetaRev = txnResp.Header.Revision
+		latestRev = txnResp.Header.Revision
 		creationRevs["key-1"] = txnResp.Header.Revision
 
 		resp, err = client.Get(ctx, "key-1")
@@ -188,7 +191,7 @@ func TestIntegrationBulk(t *testing.T) {
 
 	t.Run("update single key using incorrect mod rev constraint", func(t *testing.T) {
 		txnResp, err := client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", lastSeenMetaRev-10)).
+			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", latestRev-10)).
 			Then(clientv3.OpPut("key-1", "new-value-3")).Commit()
 		require.NoError(t, err)
 		assert.False(t, txnResp.Succeeded)
@@ -200,7 +203,7 @@ func TestIntegrationBulk(t *testing.T) {
 
 	t.Run("update single key using incorrect mod rev constraint with get", func(t *testing.T) {
 		txnResp, err := client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", lastSeenMetaRev-10)).
+			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", latestRev-10)).
 			Then(clientv3.OpPut("key-1", "new-value-3")).
 			Else(clientv3.OpGet("key-1")).Commit()
 		require.NoError(t, err)
@@ -214,7 +217,7 @@ func TestIntegrationBulk(t *testing.T) {
 	})
 
 	t.Run("compaction", func(t *testing.T) {
-		_, err := client.Compact(ctx, lastSeenMetaRev-1)
+		_, err := client.Compact(ctx, latestRev-1)
 		require.NoError(t, err)
 
 		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")))

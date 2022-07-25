@@ -41,13 +41,13 @@ func getAvailablePort(t testing.TB) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Event {
+func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*Event {
 	i := 0
-	slice := make([]*clientv3.Event, n)
+	slice := make([]*Event, n)
 	for msg := range watch {
 		for _, event := range msg.Events {
 			t.Logf("got event %d (rev %d) from watch", i, event.Kv.ModRevision)
-			slice[i] = event
+			slice[i] = &Event{Event: event}
 			i++
 			if i >= n {
 				return slice
@@ -56,6 +56,12 @@ func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Ev
 	}
 	return nil
 }
+
+type Event struct {
+	*clientv3.Event
+}
+
+func (e *Event) GetRevision() int64 { return e.Kv.ModRevision }
 
 type HasRevision interface {
 	GetRevision() int64
@@ -67,4 +73,12 @@ func GetEventRevisions[T HasRevision](events []T) []int64 {
 		ret[i] = event.GetRevision()
 	}
 	return ret
+}
+
+func NewSeq(start, end int64) []int64 {
+	slice := make([]int64, end-start)
+	for i := int64(0); i < end-start; i++ {
+		slice[i] = start + i
+	}
+	return slice
 }

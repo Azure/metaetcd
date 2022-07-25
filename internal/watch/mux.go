@@ -112,28 +112,17 @@ func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, c
 
 	// Start listening for new events
 	m.tree.Add(i, eventCh)
-	chanStartRev := m.buffer.LatestVisibleRev()
 
 	ch <- &etcdserverpb.WatchResponse{WatchId: req.WatchId, Created: true, Header: &etcdserverpb.ResponseHeader{}}
 
 	// Backfill old events
-	var startingRev int64
-	for j := 0; true; j++ {
-		events, lowerBound, upperBound := m.buffer.Range(startingRev, i)
-		if j == 0 && lowerBound > req.StartRevision {
-			staleWatchCount.Inc()
-			return nil, lowerBound
-		}
-		for _, event := range events {
-			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event.Event}}
-			if event.Kv.ModRevision > startingRev {
-				startingRev = event.Kv.ModRevision
-			}
-		}
-		if upperBound >= chanStartRev {
-			break
-		}
-		time.Sleep(time.Millisecond * 100)
+	events, min, max := m.buffer.Range(req.StartRevision, i)
+	if min > req.StartRevision {
+		staleWatchCount.Inc()
+		return nil, min
+	}
+	for _, event := range events {
+		ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event.Event}}
 	}
 
 	go func() {
@@ -147,7 +136,7 @@ func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, c
 	go func() {
 		defer close(done)
 		for event := range eventCh {
-			if event.Kv.ModRevision < startingRev {
+			if event.Kv.ModRevision < max {
 				continue
 			}
 			ch <- &etcdserverpb.WatchResponse{Header: &etcdserverpb.ResponseHeader{}, WatchId: req.WatchId, Events: []*mvccpb.Event{event}}
