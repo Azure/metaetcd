@@ -53,12 +53,12 @@ func TestIntegrationBulk(t *testing.T) {
 	})
 
 	t.Run("watch", func(t *testing.T) {
-		collectEvents(t, watch, 100)
+		testutil.CollectEvents(t, watch, 100)
 	})
 
 	t.Run("watch from rev", func(t *testing.T) {
 		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(lastSeenMetaRev-15))
-		collectEvents(t, watch, 16)
+		testutil.CollectEvents(t, watch, 16)
 	})
 
 	t.Run("watch from too old of rev", func(t *testing.T) {
@@ -279,20 +279,4 @@ func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTi
 
 	require.NoError(t, clk.Init())
 	return NewServer(coordinator, members, clk)
-}
-
-func collectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*clientv3.Event {
-	i := 0
-	slice := make([]*clientv3.Event, n)
-	for msg := range watch {
-		for _, event := range msg.Events {
-			t.Logf("got event %d (rev %d) from watch", i, event.Kv.ModRevision)
-			slice[i] = event
-			i++
-			if i >= n {
-				return slice
-			}
-		}
-	}
-	return nil
 }

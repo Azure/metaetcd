@@ -82,7 +82,7 @@ func TestTimeBufferRange(t *testing.T) {
 	results, min, max := b.Range(2, struct{}{})
 	assert.Equal(t, int64(1), min)
 	assert.Equal(t, int64(7), max)
-	assert.Equal(t, []int64{3, 5, 6, 7}, testutil.EventModRevs(results))
+	assert.Equal(t, []int64{3, 5, 6, 7}, testutil.GetEventRevisions(results))
 }
 
 type testEvent struct {
