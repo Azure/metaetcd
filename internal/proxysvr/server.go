@@ -218,7 +218,7 @@ func (s *server) Watch(srv etcdserverpb.Watch_WatchServer) error {
 func (s *server) Txn(ctx context.Context, req *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {
 	requestCount.WithLabelValues("Txn").Inc()
 
-	key, err := s.clock.MungeTxnPreflight(req)
+	key, err := s.clock.ValidateTxn(req)
 	if err != nil {
 		return nil, err
 	}

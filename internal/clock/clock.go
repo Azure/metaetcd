@@ -27,6 +27,7 @@ var (
 )
 
 // Clock implements the meta cluster's logic clock.
+// It allows the meta cluster to preserve Happens-Before semantics between keys that span two etcd clusters.
 type Clock struct {
 	Coordinator *membership.CoordinatorClientSet
 	Members     *membership.Pool
@@ -45,11 +46,11 @@ func (c *Clock) Init() error {
 
 func (c *Clock) MungeRangeResp(resp *etcdserverpb.RangeResponse) {
 	for _, kv := range resp.Kvs {
-		resolveModRev(kv)
+		swapModRevision(kv)
 	}
 }
 
-func (c *Clock) MungeTxnPreflight(req *etcdserverpb.TxnRequest) ([]byte, error) {
+func (c *Clock) ValidateTxn(req *etcdserverpb.TxnRequest) ([]byte, error) {
 	key, err := validateTxComparisons(req.Compare)
 	if err != nil {
 		return nil, err
@@ -64,8 +65,8 @@ func (c *Clock) MungeTxnPreflight(req *etcdserverpb.TxnRequest) ([]byte, error) 
 func (c *Clock) MungeTxn(metaRev int64, req *etcdserverpb.TxnRequest) {
 	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, uint64(metaRev))
-	appendMetaRevToTxOps(buf, req.Success)
-	appendMetaRevToTxOps(buf, req.Failure)
+	transformTxOps(buf, req.Success)
+	transformTxOps(buf, req.Failure)
 
 	updateClockOp := &etcdserverpb.RequestOp{
 		Request: &etcdserverpb.RequestOp_RequestPut{
@@ -82,17 +83,17 @@ func (c *Clock) MungeTxn(metaRev int64, req *etcdserverpb.TxnRequest) {
 func (c *Clock) MungeTxnResp(metaRev int64, resp *etcdserverpb.TxnResponse) {
 	for _, r := range resp.Responses {
 		if p := r.GetResponsePut(); p != nil {
-			resolveModRev(p.PrevKv)
+			swapModRevision(p.PrevKv)
 			p.Header.Revision = metaRev
 		}
 		if p := r.GetResponseRange(); p != nil {
 			for _, kv := range p.Kvs {
-				resolveModRev(kv)
+				swapModRevision(kv)
 			}
 		}
 		if p := r.GetResponseDeleteRange(); p != nil {
 			for _, kv := range p.PrevKvs {
-				resolveModRev(kv)
+				swapModRevision(kv)
 				p.Header.Revision = metaRev
 			}
 		}
@@ -109,7 +110,7 @@ func (c *Clock) MungeEvents(events []*clientv3.Event) (int64, []*mvccpb.Event, b
 
 	for _, event := range events {
 		if event.PrevKv != nil && len(event.PrevKv.Value) >= 8 {
-			event.PrevKv.ModRevision = getMetaRevFromValue(event.PrevKv.Value)
+			event.PrevKv.ModRevision = getRevisionFromValue(event.PrevKv.Value)
 			event.PrevKv.Value = event.PrevKv.Value[:len(event.PrevKv.Value)-8]
 		}
 		if event.Type == clientv3.EventTypeDelete {
@@ -118,7 +119,7 @@ func (c *Clock) MungeEvents(events []*clientv3.Event) (int64, []*mvccpb.Event, b
 		}
 
 		isCreate := event.Kv.CreateRevision == event.Kv.ModRevision
-		event.Kv.ModRevision = getMetaRevFromValue(event.Kv.Value)
+		event.Kv.ModRevision = getRevisionFromValue(event.Kv.Value)
 		if isCreate {
 			event.Kv.CreateRevision = event.Kv.ModRevision
 		}
@@ -142,11 +143,13 @@ func (c *Clock) MungeEvents(events []*clientv3.Event) (int64, []*mvccpb.Event, b
 	return meta, out, true
 }
 
+// Reset deletes the coordinator's account of the current time.
 func (c *Clock) Reset(ctx context.Context) error {
 	_, err := c.Coordinator.ClientV3.KV.Delete(ctx, metaKey)
 	return err
 }
 
+// Now returns the cluster's current timestamp/revision.
 func (c *Clock) Now(ctx context.Context) (int64, error) {
 	resp, err := c.Coordinator.ClientV3.Get(ctx, metaKey)
 	if err != nil {
@@ -155,9 +158,10 @@ func (c *Clock) Now(ctx context.Context) (int64, error) {
 	if len(resp.Kvs) == 0 {
 		return c.reconstituteClock(ctx, 0)
 	}
-	return resolveMetaRev(resp.Kvs[0]), nil
+	return getRevisionFromCoordinator(resp.Kvs[0]), nil
 }
 
+// Tick increments and returns the cluster's current timestamp/revision.
 func (c *Clock) Tick(ctx context.Context) (int64, error) {
 	resp, err := c.Coordinator.ClientV3.KV.Txn(ctx).Then(
 		clientv3.OpPut(metaKey, "", clientv3.WithIgnoreValue()),
@@ -169,21 +173,20 @@ func (c *Clock) Tick(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("ticking clock: %w", err)
 	}
-	return resolveMetaRev(resp.Responses[1].GetResponseRange().Kvs[0]), nil
+	return getRevisionFromCoordinator(resp.Responses[1].GetResponseRange().Kvs[0]), nil
 }
 
 func (c *Clock) reconstituteClock(ctx context.Context, delta int64) (int64, error) {
 	c.Coordinator.ClockReconstitutionLock.Lock(ctx)
 	defer c.Coordinator.ClockReconstitutionLock.Unlock(context.Background())
-
-	// TODO: Counter
+	clockReconstitutions.Inc()
 
 	resp, err := c.Coordinator.ClientV3.Get(ctx, metaKey)
 	if err != nil {
 		return 0, fmt.Errorf("getting clock: %w", err)
 	}
 	if len(resp.Kvs) > 0 {
-		return resolveMetaRev(resp.Kvs[0]), nil
+		return getRevisionFromCoordinator(resp.Kvs[0]), nil
 	}
 
 	zap.L().Error("clock was lost - reconstituting from member clusters")
@@ -220,6 +223,7 @@ func (c *Clock) reconstituteClock(ctx context.Context, delta int64) (int64, erro
 	return latestMetaRev, nil
 }
 
+// ResolveMetaToMember finds at least the corresponding member revision for a given meta revision.
 func (c *Clock) ResolveMetaToMember(ctx context.Context, client *membership.ClientSet, metaRev int64) (int64, error) {
 	var zeroKeyRev int64
 	i := 0
@@ -250,6 +254,10 @@ func (c *Clock) ResolveMetaToMember(ctx context.Context, client *membership.Clie
 	}
 }
 
+// ResolveMetaToMemberTxn returns the member revision that corresponds with a given transaction operation.
+// If the given meta revision doesn't match a value's current revision, an error response is returned instead.
+// If the transaction includes a get operation for the same key, a conforming response is returned.
+// This implements an odd but essential set of behaviors that make Kubernetes's etcd store work.
 func (c *Clock) ResolveMetaToMemberTxn(ctx context.Context, client *membership.ClientSet, key []byte, metaRev int64, req *etcdserverpb.TxnRequest) (int64, *etcdserverpb.TxnResponse, error) {
 	resp, err := client.ClientV3.Get(ctx, string(key))
 	if err != nil {
@@ -269,14 +277,14 @@ func (c *Clock) ResolveMetaToMemberTxn(ctx context.Context, client *membership.C
 }
 
 func (c *Clock) resolveMetaToMemberTxn(metaRev int64, req *etcdserverpb.TxnRequest, current *clientv3.GetResponse) (int64, *etcdserverpb.TxnResponse) {
-	modMetaRev := getMetaRevFromValue(current.Kvs[0].Value)
+	modMetaRev := getRevisionFromValue(current.Kvs[0].Value)
 	if modMetaRev == metaRev {
 		return current.Kvs[0].ModRevision, nil
 	}
 
 	returnVal := &etcdserverpb.TxnResponse{Header: &etcdserverpb.ResponseHeader{}}
 	for _, kv := range current.Kvs {
-		resolveModRev(kv)
+		swapModRevision(kv)
 	}
 
 	for _, op := range req.Failure {
@@ -365,11 +373,11 @@ func validateTxOps(key []byte, ops []*etcdserverpb.RequestOp) ([]byte, error) {
 	return key, nil
 }
 
-func resolveModRev(kv *mvccpb.KeyValue) {
+func swapModRevision(kv *mvccpb.KeyValue) {
 	if kv == nil {
 		return
 	}
-	if len(kv.Value) < 9 {
+	if len(kv.Value) < 8 {
 		kv.ModRevision = 0
 		kv.CreateRevision = 0
 		return
@@ -380,7 +388,7 @@ func resolveModRev(kv *mvccpb.KeyValue) {
 	kv.Value = kv.Value[:len(kv.Value)-8]
 }
 
-func resolveMetaRev(kv *mvccpb.KeyValue) int64 {
+func getRevisionFromCoordinator(kv *mvccpb.KeyValue) int64 {
 	if len(kv.Value) < 8 {
 		return kv.Version
 	}
@@ -388,7 +396,14 @@ func resolveMetaRev(kv *mvccpb.KeyValue) int64 {
 	return offset + kv.Version
 }
 
-func appendMetaRevToTxOps(metaRevBytes []byte, ops []*etcdserverpb.RequestOp) {
+func getRevisionFromValue(val []byte) int64 {
+	if len(val) < 8 {
+		return 0
+	}
+	return int64(binary.LittleEndian.Uint64(val[len(val)-8:]))
+}
+
+func transformTxOps(metaRevBytes []byte, ops []*etcdserverpb.RequestOp) {
 	for _, op := range ops {
 		if put := op.GetRequestPut(); put != nil {
 			put.Value = append(put.Value, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -396,11 +411,4 @@ func appendMetaRevToTxOps(metaRevBytes []byte, ops []*etcdserverpb.RequestOp) {
 			continue
 		}
 	}
-}
-
-func getMetaRevFromValue(val []byte) int64 {
-	if len(val) < 8 {
-		return 0
-	}
-	return int64(binary.LittleEndian.Uint64(val[len(val)-8:]))
 }
