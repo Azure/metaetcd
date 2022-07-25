@@ -260,7 +260,7 @@ func newServer(t testing.TB, coordinatorURL string, memberURLs []string, watchTi
 
 	partitions := membership.NewStaticPartitions(len(memberURLs))
 	for i, memberURL := range memberURLs {
-		err = members.AddMember(membership.MemberID(i), memberURL, partitions[i])
+		err = members.AddMember(ctx, membership.MemberID(i), memberURL, partitions[i])
 		require.NoError(t, err)
 	}
 

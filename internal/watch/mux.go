@@ -18,6 +18,7 @@ type EventTransformer interface {
 	MungeEvents([]*clientv3.Event) (metaRev int64, events []*mvccpb.Event, ok bool)
 }
 
+// Mux bridges between incoming watch connections from clients and outgoing watch connections to member clusters.
 type Mux struct {
 	buffer      *util.TimeBuffer[adt.Interval, *eventWrapper]
 	ch          chan *eventWrapper
@@ -47,18 +48,21 @@ func (m *Mux) Run(ctx context.Context) {
 	}
 }
 
-func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
-	resp, err := client.KV.Get(context.Background(), "a")
+func (m *Mux) StartWatch(ctx context.Context, client *clientv3.Client) (*Status, error) {
+	watchesDialing.Inc()
+	resp, err := client.KV.Get(ctx, "a") // any key will do - doesn't need to exist
 	if err != nil {
 		return nil, fmt.Errorf("getting current revision: %w", err)
 	}
 
+	// Don't use the provided context. It's for establishing a connection - this one is for running it.
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Status{
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
 
+	// Warm the buffer by starting the watch at (current revision) - (buffer length)
 	nextEvent := (resp.Header.Revision + 1)
 	startRev := nextEvent - int64(m.buffer.Len())
 	if startRev < 0 {
@@ -67,8 +71,12 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 
 	ctx = clientv3.WithRequireLeader(ctx)
 	w := client.Watch(ctx, "", clientv3.WithPrefix(), clientv3.WithRev(startRev), clientv3.WithPrevKV())
+	watchesDialing.Dec()
+
 	go func() {
-		close(s.done)
+		watchesRunning.Inc()
+		defer watchesRunning.Dec()
+		defer close(s.done)
 		m.watchLoop(w)
 		if ctx.Err() == nil {
 			zap.L().Sugar().Panicf("watch of client with endpoints '%+s' closed unexpectedly", client.Endpoints())
@@ -99,7 +107,7 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 }
 
 func (m *Mux) Watch(ctx context.Context, req *etcdserverpb.WatchCreateRequest, ch chan<- *etcdserverpb.WatchResponse) (func(), int64) {
-	eventCh := make(chan *mvccpb.Event, 2000) // TODO: Make this tunable
+	eventCh := make(chan *mvccpb.Event, m.buffer.Len())
 	i := adt.NewStringAffineInterval(string(req.Key), string(req.RangeEnd))
 
 	// Start listening for new events

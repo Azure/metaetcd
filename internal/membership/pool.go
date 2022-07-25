@@ -42,13 +42,13 @@ func NewPool(gc *GrpcContext, wm *watch.Mux) *Pool {
 	}
 }
 
-func (p *Pool) AddMember(id MemberID, endpointURL string, partitions []PartitionID) error {
+func (p *Pool) AddMember(ctx context.Context, id MemberID, endpointURL string, partitions []PartitionID) error {
 	clientset, err := NewClientSet(p.grpcContext, endpointURL)
 	if err != nil {
 		return fmt.Errorf("constructing clientset: %w", err)
 	}
 
-	clientset.WatchStatus, err = p.WatchMux.StartWatch(clientset.ClientV3)
+	clientset.WatchStatus, err = p.WatchMux.StartWatch(ctx, clientset.ClientV3)
 	if err != nil {
 		return fmt.Errorf("starting watch connection: %w", err)
 	}
