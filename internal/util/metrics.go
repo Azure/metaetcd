@@ -6,7 +6,7 @@ var (
 	timeBufferVisibleMax = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "metaetcd_time_buffer_visible_max",
-			Help: "Max revision visible from the time buffer",
+			Help: "Max revision visible from the time buffer.",
 		})
 
 	timeBufferLength = prometheus.NewGauge(
@@ -18,7 +18,7 @@ var (
 	timeBufferTimeoutCount = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "metaetcd_time_buffer_timeouts_count",
-			Help: "The number of buffer event gaps that were never filled.",
+			Help: "The number of buffer event gaps that have timed out.",
 		})
 )
 

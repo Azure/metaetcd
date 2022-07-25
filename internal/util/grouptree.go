@@ -6,6 +6,8 @@ import (
 	"go.etcd.io/etcd/pkg/v3/adt"
 )
 
+// GroupTree extends etcd's ADT package by grouping listeners such that they can overlap.
+// Otherwise ADT only supports a single listener per keyspace.
 type GroupTree[T any] struct {
 	mut  sync.RWMutex
 	tree adt.IntervalTree
