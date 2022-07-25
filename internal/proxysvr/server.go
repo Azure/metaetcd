@@ -115,9 +115,8 @@ func (s *server) Range(ctx context.Context, req *etcdserverpb.RangeRequest) (*et
 	err := s.members.IterateMembers(ctx, func(ctx context.Context, client *membership.ClientSet) error {
 		return s.rangeWithClient(ctx, req, resp, metaRev, client, &mut)
 	})
+	sort.Slice(resp.Kvs, func(i, j int) bool { return bytes.Compare(resp.Kvs[i].Key, resp.Kvs[j].Key) < 0 })
 	if req.Limit != 0 && int64(len(resp.Kvs)) > req.Limit {
-		// TODO: Make sure to add test coverage for the sorting below
-		sort.Slice(resp.Kvs, func(i, j int) bool { return bytes.Compare(resp.Kvs[i].Key, resp.Kvs[j].Key) < 0 })
 		resp.Kvs = resp.Kvs[:req.Limit]
 		resp.More = true
 	}
@@ -143,17 +142,19 @@ func (s *server) rangeWithClient(ctx context.Context, req *etcdserverpb.RangeReq
 		return fmt.Errorf("ranging at member rev %d: %w", memberRev, err)
 	}
 
+	if mut != nil {
+		mut.Lock()
+	}
 	resp.Count += r.Count
+	if r.More {
+		resp.More = true
+	}
 	if !req.CountOnly {
 		s.clock.MungeRangeResp(r)
-
-		if mut != nil {
-			mut.Lock()
-		}
 		resp.Kvs = append(resp.Kvs, r.Kvs...)
-		if mut != nil {
-			mut.Unlock()
-		}
+	}
+	if mut != nil {
+		mut.Unlock()
 	}
 
 	return nil

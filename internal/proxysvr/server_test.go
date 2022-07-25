@@ -22,208 +22,290 @@ import (
 
 var ctx = context.Background()
 
-func TestIntegrationBulk(t *testing.T) {
-	n := 100
-	var latestRev int64
-	client, s := startServer(t)
+func TestCRUD(t *testing.T) {
+	var creationRev, updateRev, deleteRev int64
+	const key = "key"
+	client, _ := startServer(t)
 
+	t.Run("create", func(t *testing.T) {
+		resp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-1")).Commit()
+		require.NoError(t, err)
+		creationRev = resp.Header.Revision
+	})
+
+	t.Run("get creation", func(t *testing.T) {
+		getResp, err := client.Get(ctx, key)
+		require.NoError(t, err)
+		require.Len(t, getResp.Kvs, 1)
+		assert.Equal(t, key, string(getResp.Kvs[0].Key))
+		assert.Equal(t, "value-1", string(getResp.Kvs[0].Value))
+		assert.Equal(t, creationRev, getResp.Kvs[0].ModRevision)
+		assert.Equal(t, creationRev, getResp.Header.Revision)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		resp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-2")).Commit()
+		require.NoError(t, err)
+		assert.Equal(t, creationRev+1, resp.Header.Revision)
+		updateRev = resp.Header.Revision
+	})
+
+	t.Run("get update", func(t *testing.T) {
+		getResp, err := client.Get(ctx, key)
+		require.NoError(t, err)
+		require.Len(t, getResp.Kvs, 1)
+		assert.Equal(t, key, string(getResp.Kvs[0].Key))
+		assert.Equal(t, "value-2", string(getResp.Kvs[0].Value))
+		assert.Equal(t, updateRev, getResp.Kvs[0].ModRevision)
+		assert.Equal(t, updateRev, getResp.Header.Revision)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		resp, err := client.Txn(ctx).Then(clientv3.OpDelete(key)).Commit()
+		require.NoError(t, err)
+		assert.Equal(t, updateRev+1, resp.Header.Revision)
+		deleteRev = resp.Header.Revision
+	})
+
+	t.Run("get deletion", func(t *testing.T) {
+		getResp, err := client.Get(ctx, key)
+		require.NoError(t, err)
+		require.Len(t, getResp.Kvs, 0)
+		assert.Equal(t, deleteRev, getResp.Header.Revision)
+	})
+}
+
+func TestWatchHappyPath(t *testing.T) {
+	client, _ := startServer(t)
+
+	// Create some events before starting the watch
+	n := 10
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("key-before-%d", i)
+		_, err := client.Txn(ctx).Then(clientv3.OpPut(key, "")).Commit()
+		require.NoError(t, err)
+
+		if i == n {
+			_, err := client.Txn(ctx).Then(clientv3.OpDelete(fmt.Sprintf("key-before-%d", i-1))).Commit()
+			require.NoError(t, err)
+		}
+	}
+
+	// Start the watch
 	watchCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV())
 
-	creationRevs := map[string]int64{}
-	t.Run("create", func(t *testing.T) {
-		for i := 0; i < n+1; i++ {
-			key := fmt.Sprintf("key-%d", i)
-			value := fmt.Sprintf("value-%d", i)
-
-			resp, err := client.Txn(ctx).Then(clientv3.OpPut(key, value)).Commit()
-			require.NoError(t, err)
-			latestRev = resp.Header.Revision
-			creationRevs[key] = latestRev // used to assert on mod rev later
-			assert.Equal(t, int64(i+2), latestRev, "n is zero-indexed, meta rev initializes to one, first write is two")
-
-			// Delete the last value
-			if i == n {
-				resp, err := client.Txn(ctx).Then(clientv3.OpDelete(fmt.Sprintf("key-%d", i-1))).Commit()
-				require.NoError(t, err)
-				latestRev = resp.Header.Revision
-			}
-		}
-	})
-
-	t.Run("watch", func(t *testing.T) {
-		events := testutil.CollectEvents(t, watch, 100)
-		assert.Equal(t, testutil.NewSeq(2, int64(n+2)), testutil.GetEventRevisions(events))
-	})
-
-	t.Run("watch from rev", func(t *testing.T) {
-		startRev := latestRev - 50
-		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(startRev))
-		events := testutil.CollectEvents(t, watch, 16)
-		assert.Equal(t, testutil.NewSeq(startRev+1, startRev+17), testutil.GetEventRevisions(events))
-	})
-
-	t.Run("watch from too old of rev", func(t *testing.T) {
-		watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(-2))
-		event := <-watch
-		assert.EqualError(t, event.Err(), "etcdserver: mvcc: required revision has been compacted")
-	})
-
-	cancel()
-
-	t.Run("get", func(t *testing.T) {
-		for i := 0; i < n-1; i++ {
-			key := fmt.Sprintf("key-%d", i)
-			value := fmt.Sprintf("value-%d", i)
-
-			getResp, err := client.Get(ctx, key)
-			require.NoError(t, err)
-			require.Len(t, getResp.Kvs, 1, "a single KV response is expected for key %s", key)
-			assert.Equal(t, key, string(getResp.Kvs[0].Key), "key matches")
-			assert.Equal(t, value, string(getResp.Kvs[0].Value), "value matches")
-			assert.Equal(t, creationRevs[key], getResp.Kvs[0].ModRevision, "mod rev matches meta cluster rev at the time the key was last written")
-			assert.Equal(t, latestRev, getResp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
-		}
-	})
-
-	rangeAll := func() {
-		t.Run("range", func(t *testing.T) {
-			resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")))
-			require.NoError(t, err)
-			require.Len(t, resp.Kvs, n)
-			assert.Equal(t, int64(n), resp.Count)
-			assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
-
-			for i := 0; i < n; i++ {
-				assert.Equal(t, creationRevs[string(resp.Kvs[i].Key)], resp.Kvs[i].ModRevision, "mod rev matches meta cluster rev at the time the key was last written")
-			}
-		})
-	}
-	rangeAll()
-
-	t.Run("range with limit", func(t *testing.T) {
-		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithLimit(11))
+	// Create some events now that the watch is running
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("key-after-%d", i)
+		_, err := client.Txn(ctx).Then(clientv3.OpPut(key, "")).Commit()
 		require.NoError(t, err)
-		assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
-		assert.Len(t, resp.Kvs, 11)
+
+		if i == n {
+			_, err := client.Txn(ctx).Then(clientv3.OpDelete(fmt.Sprintf("key-after-%d", i-1))).Commit()
+			require.NoError(t, err)
+		}
+	}
+
+	// Prove all events are eventually receieved
+	events := testutil.CollectEvents(t, watch, 20)
+	assert.Equal(t, testutil.NewSeq(2, 22), testutil.GetRevisions(events))
+}
+
+func TestWatchFromRev(t *testing.T) {
+	client, _ := startServer(t)
+
+	// Create some events
+	n := 10
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		_, err := client.Txn(ctx).Then(clientv3.OpPut(key, "")).Commit()
+		require.NoError(t, err)
+	}
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(5))
+
+	// Prove all events are eventually receieved
+	events := testutil.CollectEvents(t, watch, 5)
+	assert.Equal(t, testutil.NewSeq(2, 7), testutil.GetRevisions(events))
+}
+
+func TestWatchCompacted(t *testing.T) {
+	client, _ := startServer(t)
+
+	watchCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watch := client.Watch(watchCtx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithPrevKV(), clientv3.WithRev(-2))
+	event := <-watch
+	assert.EqualError(t, event.Err(), "etcdserver: mvcc: required revision has been compacted")
+}
+
+func TestTxModRevisionComparisonHappyPath(t *testing.T) {
+	const key = "key"
+	client, _ := startServer(t)
+
+	// Create
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-1")).Commit()
+	require.NoError(t, err)
+
+	// Update
+	txnResp, err := client.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", createResp.Header.Revision)).
+		Then(clientv3.OpPut(key, "value-2")).Commit()
+	require.NoError(t, err)
+	assert.Equal(t, txnResp.Header.Revision, txnResp.Responses[0].GetResponsePut().Header.Revision)
+	assert.NotEqual(t, createResp.Header.Revision, txnResp.Header.Revision)
+}
+
+func TestTxModRevisionComparisonIncorrectRev(t *testing.T) {
+	const key = "key"
+	client, _ := startServer(t)
+
+	// Create
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-1")).Commit()
+	require.NoError(t, err)
+
+	// Update
+	txnResp, err := client.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", createResp.Header.Revision-1)).
+		Then(clientv3.OpPut(key, "value-2")).Commit()
+	require.NoError(t, err)
+	assert.False(t, txnResp.Succeeded)
+	assert.Zero(t, txnResp.Header.Revision)
+}
+
+func TestTxModRevisionComparisonIncorrectRevWithGet(t *testing.T) {
+	const key = "key"
+	client, _ := startServer(t)
+
+	// Create
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-1")).Commit()
+	require.NoError(t, err)
+
+	// Update
+	txnResp, err := client.Txn(ctx).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", createResp.Header.Revision-1)).
+		Then(clientv3.OpPut(key, "value-2")).
+		Else(clientv3.OpGet(key)).Commit()
+	require.NoError(t, err)
+	assert.False(t, txnResp.Succeeded)
+	assert.Zero(t, txnResp.Header.Revision)
+	require.NotNil(t, txnResp.Responses[0].GetResponseRange())
+	require.Equal(t, "value-1", string(txnResp.Responses[0].GetResponseRange().Kvs[0].Value))
+}
+
+func TestCompaction(t *testing.T) {
+	const key = "key"
+	client, _ := startServer(t)
+
+	// Create and update a key
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-1")).Commit()
+	require.NoError(t, err)
+
+	updateResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "value-2")).Commit()
+	require.NoError(t, err)
+
+	// Compact
+	_, err = client.Compact(ctx, updateResp.Header.Revision)
+	require.NoError(t, err)
+
+	// Try to get older rev
+	_, err = client.Get(ctx, key, clientv3.WithRev(createResp.Header.Revision))
+	require.EqualError(t, err, "etcdserver: mvcc: required revision has been compacted")
+}
+
+func TestRange(t *testing.T) {
+	client, _ := startServer(t)
+
+	n := 10
+	var creationRev int64
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("key-%d", i+1)
+		resp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "")).Commit()
+		require.NoError(t, err)
+		creationRev = resp.Header.Revision
+	}
+
+	t.Run("all", func(t *testing.T) {
+		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")))
+		require.NoError(t, err)
+		assert.False(t, resp.More)
 		assert.Equal(t, int64(n), resp.Count)
+		assert.Equal(t, creationRev, resp.Header.Revision)
+		assert.Equal(t, []string{"key-1", "key-10", "key-2", "key-3", "key-4", "key-5", "key-6", "key-7", "key-8", "key-9"}, testutil.GetKeys(testutil.NewItems(resp.Kvs)))
 	})
 
-	t.Run("range page over the keyspace", func(t *testing.T) {
-		var keys []*mvccpb.KeyValue
+	t.Run("at previous rev", func(t *testing.T) {
+		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithRev(creationRev-3))
+		require.NoError(t, err)
+		assert.False(t, resp.More)
+		assert.Equal(t, int64(n-3), resp.Count)
+		assert.Equal(t, creationRev-3, resp.Header.Revision)
+		assert.Equal(t, []string{"key-1", "key-2", "key-3", "key-4", "key-5", "key-6", "key-7"}, testutil.GetKeys(testutil.NewItems(resp.Kvs)))
+	})
+
+	t.Run("paging over keys", func(t *testing.T) {
+		var kvs [][]*mvccpb.KeyValue
+		var counts []int64
+		var mores []bool
 		startKey := "key-"
-		for {
-			resp, err := client.Get(ctx, startKey, clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithLimit(9))
+		for i := 0; i < 5; i++ {
+			resp, err := client.Get(ctx, startKey, clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithLimit(3))
 			require.NoError(t, err)
-			// TODO: Assert on page length (I think it's incorrect currently)
 
-			keys = append(keys, resp.Kvs...)
-			if len(keys) >= n {
-				break
-			}
-
-			// TODO: This smells sus
-			if !assert.NotEmpty(t, resp.Kvs) {
+			kvs = append(kvs, resp.Kvs)
+			counts = append(counts, resp.Count)
+			mores = append(mores, resp.More)
+			if len(resp.Kvs) > 0 {
 				startKey = string(resp.Kvs[len(resp.Kvs)-1].Key) + "\x00"
 			}
 		}
-
-		for i := 0; i < n; i++ {
-			assert.Equal(t, creationRevs[string(keys[i].Key)], keys[i].ModRevision)
-		}
+		assert.Equal(t, []string{"key-1", "key-10", "key-2"}, testutil.GetKeys(testutil.NewItems(kvs[0])))
+		assert.Equal(t, []string{"key-3", "key-4", "key-5"}, testutil.GetKeys(testutil.NewItems(kvs[1])))
+		assert.Equal(t, []string{"key-6", "key-7", "key-8"}, testutil.GetKeys(testutil.NewItems(kvs[2])))
+		assert.Equal(t, []string{"key-9"}, testutil.GetKeys(testutil.NewItems(kvs[3])))
+		assert.Len(t, kvs[4], 0)
+		assert.Equal(t, []int64{10, 7, 4, 1, 0}, counts)
+		assert.Equal(t, []bool{true, true, true, false, false}, mores)
 	})
+}
 
-	t.Run("range with count", func(t *testing.T) {
-		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithCountOnly())
-		require.NoError(t, err)
-		assert.Equal(t, latestRev, resp.Header.Revision, "meta cluster rev at time of read matches the rev of the last observed write")
-		assert.Len(t, resp.Kvs, 0)
-		assert.Equal(t, int64(n), resp.Count)
-	})
+func TestReconstituteClockOnRead(t *testing.T) {
+	key := "key"
+	client, s := startServer(t)
 
-	t.Run("range with revision", func(t *testing.T) {
-		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")), clientv3.WithRev(20))
-		require.NoError(t, err)
-		require.Len(t, resp.Kvs, 19)
-		assert.Equal(t, int64(19), resp.Count)
-	})
+	// Increment the clock
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut(key, "")).Commit()
+	require.NoError(t, err)
 
-	// Delete the clock state from the coordinator before sending a range to test reconstitution on reads
-	t.Run("delete clock state", func(t *testing.T) {
-		require.NoError(t, s.clock.Reset(ctx))
-	})
-	rangeAll()
+	// Lose the current time
+	require.NoError(t, s.clock.Reset(ctx))
 
-	// Delete clock state again to test reconstitution on writes (next step in test)
-	t.Run("delete clock state again", func(t *testing.T) {
-		require.NoError(t, s.clock.Reset(ctx))
-	})
+	// Get the value
+	resp, err := client.Get(ctx, key)
+	require.NoError(t, err)
+	require.Len(t, resp.Kvs, 1)
+	assert.Equal(t, createResp.Header.Revision, resp.Kvs[0].ModRevision)
+}
 
-	// Update a single key and prove the mod rev reflects the meta cluster rev
-	t.Run("update single key", func(t *testing.T) {
-		txnResp, err := client.Txn(ctx).Then(clientv3.OpPut("key-1", "new-value")).Commit()
-		require.NoError(t, err)
-		latestRev = txnResp.Header.Revision
+func TestReconstituteClockOnWrite(t *testing.T) {
+	client, s := startServer(t)
 
-		resp, err := client.Get(ctx, "key-1")
-		require.NoError(t, err)
-		assert.Equal(t, txnResp.Header.Revision, resp.Kvs[0].ModRevision, "mod revision matches the number of writes we've made (init, n creates, one update)")
-	})
+	// Increment the clock
+	createResp, err := client.Txn(ctx).Then(clientv3.OpPut("key-1", "")).Commit()
+	require.NoError(t, err)
 
-	t.Run("update single key using mod rev constraint", func(t *testing.T) {
-		resp, err := client.Get(ctx, "key-1")
-		require.NoError(t, err)
+	// Lose the current time
+	require.NoError(t, s.clock.Reset(ctx))
 
-		txnResp, err := client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", resp.Kvs[0].ModRevision)).
-			Then(clientv3.OpPut("key-1", "new-value-2")).Commit()
-		require.NoError(t, err)
-		assert.Equal(t, txnResp.Header.Revision, txnResp.Responses[0].GetResponsePut().Header.Revision)
-		latestRev = txnResp.Header.Revision
-		creationRevs["key-1"] = txnResp.Header.Revision
-
-		resp, err = client.Get(ctx, "key-1")
-		require.NoError(t, err)
-		assert.Equal(t, "new-value-2", string(resp.Kvs[0].Value))
-		assert.Equal(t, txnResp.Header.Revision, resp.Kvs[0].ModRevision, "mod revision matches the number of writes we've made (init, n creates, one update)")
-	})
-
-	t.Run("update single key using incorrect mod rev constraint", func(t *testing.T) {
-		txnResp, err := client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", latestRev-10)).
-			Then(clientv3.OpPut("key-1", "new-value-3")).Commit()
-		require.NoError(t, err)
-		assert.False(t, txnResp.Succeeded)
-
-		resp, err := client.Get(ctx, "key-1")
-		require.NoError(t, err)
-		assert.Equal(t, "new-value-2", string(resp.Kvs[0].Value))
-	})
-
-	t.Run("update single key using incorrect mod rev constraint with get", func(t *testing.T) {
-		txnResp, err := client.Txn(ctx).
-			If(clientv3.Compare(clientv3.ModRevision("key-1"), "=", latestRev-10)).
-			Then(clientv3.OpPut("key-1", "new-value-3")).
-			Else(clientv3.OpGet("key-1")).Commit()
-		require.NoError(t, err)
-		assert.False(t, txnResp.Succeeded)
-		assert.Equal(t, int64(0), txnResp.Header.Revision)
-		assert.Equal(t, creationRevs["key-1"], txnResp.Responses[0].GetResponseRange().Kvs[0].ModRevision)
-
-		resp, err := client.Get(ctx, "key-1")
-		require.NoError(t, err)
-		assert.Equal(t, "new-value-2", string(resp.Kvs[0].Value))
-	})
-
-	t.Run("compaction", func(t *testing.T) {
-		_, err := client.Compact(ctx, latestRev-1)
-		require.NoError(t, err)
-
-		resp, err := client.Get(ctx, "key-", clientv3.WithRange(clientv3.GetPrefixRangeEnd("key-")))
-		require.NoError(t, err)
-		require.Len(t, resp.Kvs, n)
-	})
+	// Increment the clock again
+	secondCreateResp, err := client.Txn(ctx).Then(clientv3.OpPut("key-2", "")).Commit()
+	require.NoError(t, err)
+	assert.Equal(t, createResp.Header.Revision+1, secondCreateResp.Header.Revision)
 }
 
 func startServer(t testing.TB) (*clientv3.Client, *server) {

@@ -115,7 +115,7 @@ func main() {
 
 	partitions := membership.NewStaticPartitions(len(members))
 	for i, memberURL := range members {
-		err = pool.AddMember(membership.MemberID(i), memberURL, partitions[i])
+		err = pool.AddMember(context.Background(), membership.MemberID(i), memberURL, partitions[i])
 		if err != nil {
 			zap.L().Sugar().Panicf("failed to add member %q to the pool: %s", memberURL, err)
 		}

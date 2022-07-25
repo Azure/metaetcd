@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,13 +42,13 @@ func getAvailablePort(t testing.TB) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*Event {
+func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*Item {
 	i := 0
-	slice := make([]*Event, n)
+	slice := make([]*Item, n)
 	for msg := range watch {
 		for _, event := range msg.Events {
 			t.Logf("got event %d (rev %d) from watch", i, event.Kv.ModRevision)
-			slice[i] = &Event{Event: event}
+			slice[i] = &Item{KeyValue: event.Kv}
 			i++
 			if i >= n {
 				return slice
@@ -57,20 +58,41 @@ func CollectEvents(t *testing.T, watch clientv3.WatchChan, n int) []*Event {
 	return nil
 }
 
-type Event struct {
-	*clientv3.Event
+type Item struct {
+	*mvccpb.KeyValue
 }
 
-func (e *Event) GetRevision() int64 { return e.Kv.ModRevision }
+func (e *Item) GetRevision() int64 { return e.ModRevision }
+func (e *Item) GetKey() string     { return string(e.Key) }
+
+func NewItems(kvs []*mvccpb.KeyValue) []*Item {
+	slice := make([]*Item, len(kvs))
+	for i, item := range kvs {
+		slice[i] = &Item{KeyValue: item}
+	}
+	return slice
+}
 
 type HasRevision interface {
 	GetRevision() int64
 }
 
-func GetEventRevisions[T HasRevision](events []T) []int64 {
-	ret := make([]int64, len(events))
-	for i, event := range events {
-		ret[i] = event.GetRevision()
+func GetRevisions[T HasRevision](items []T) []int64 {
+	ret := make([]int64, len(items))
+	for i, item := range items {
+		ret[i] = item.GetRevision()
+	}
+	return ret
+}
+
+type HasKey interface {
+	GetKey() string
+}
+
+func GetKeys[T HasKey](items []T) []string {
+	ret := make([]string, len(items))
+	for i, item := range items {
+		ret[i] = item.GetKey()
 	}
 	return ret
 }
