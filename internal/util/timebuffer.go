@@ -1,7 +1,6 @@
 package util
 
 import (
-	"container/list"
 	"context"
 	"sync"
 	"time"
@@ -11,31 +10,32 @@ import (
 
 type BufferableEvent[T any] interface {
 	GetAge() time.Duration
-	GetModRev() int64
-	InRange(T) bool
+	GetRevision() int64
+	Matches(query T) bool
 }
 
+// TimeBuffer buffers events and sorts them by their logical timestamp.
+//
+// Events are only visible to readers when the preceding event has been received.
+// If the preceding event is never received, the following event will still become
+// visible after a (wallclock) timeout period in order to prevent deadlocks caused
+// dropped events.
+//
+// In practice, it is useful for merging streams of events that may be out of order due
+// to network latency, and have the possibility of missing events due to network partitions.
 type TimeBuffer[T any, TT BufferableEvent[T]] struct {
-	mut                    sync.Mutex
-	list                   *list.List
-	gapTimeout             time.Duration
-	maxLen                 int
-	lowerBound, upperBound int64
-	upperVal               *list.Element
-	ch                     chan<- TT
+	mut        sync.Mutex
+	list       *List[TT]
+	gapTimeout time.Duration
+	len        int
+	min, max   int64
+	cursor     *Element[TT]
+	ch         chan<- TT
 }
 
-func NewTimeBuffer[T any, TT BufferableEvent[T]](gapTimeout time.Duration, maxLen int, ch chan<- TT) *TimeBuffer[T, TT] {
-	return &TimeBuffer[T, TT]{list: list.New(), gapTimeout: gapTimeout, maxLen: maxLen, ch: ch, lowerBound: -1}
+func NewTimeBuffer[T any, TT BufferableEvent[T]](gapTimeout time.Duration, len int, ch chan<- TT) *TimeBuffer[T, TT] {
+	return &TimeBuffer[T, TT]{list: &List[TT]{}, gapTimeout: gapTimeout, len: len, min: -1, ch: ch}
 }
-
-func (t *TimeBuffer[T, TT]) LatestVisibleRev() int64 {
-	t.mut.Lock()
-	defer t.mut.Unlock()
-	return t.upperBound
-}
-
-func (t *TimeBuffer[T, TT]) MaxLen() int { return t.maxLen }
 
 func (t *TimeBuffer[T, TT]) Run(ctx context.Context) {
 	ticker := time.NewTicker(t.gapTimeout)
@@ -50,144 +50,154 @@ func (t *TimeBuffer[T, TT]) Run(ctx context.Context) {
 	}
 }
 
-func (t *TimeBuffer[T, TT]) Push(event TT) {
-	watchEventCount.Inc()
+func (t *TimeBuffer[T, TT]) LatestVisibleRev() int64 {
 	t.mut.Lock()
 	defer t.mut.Unlock()
+	return t.max
+}
 
+func (t *TimeBuffer[T, TT]) Len() int { return t.len }
+
+func (t *TimeBuffer[T, TT]) Push(event TT) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
 	t.pushUnlocked(event)
 	t.bridgeGapUnlocked()
 }
 
 func (t *TimeBuffer[T, TT]) pushUnlocked(event TT) {
-	watchBufferLength.Inc()
-	lastEl := t.list.Back()
+	timeBufferLength.Inc()
 
-	// Case 1: first element
-	if lastEl == nil {
-		t.list.PushFront(event)
-		return
-	}
-
-	// Case 2: outside of range - insert before or after
-	last := lastEl.Value.(TT)
-	if event.GetModRev() > last.GetModRev() {
-		t.list.PushBack(event)
-		return
-	}
-
-	firstEl := t.list.Front()
-	first := firstEl.Value.(TT)
-	if event.GetModRev() < first.GetModRev() {
-		t.list.PushFront(event)
-		return
-	}
-
-	// Case 3: find place between pairs of events
+	cursorItem := t.list.Last() // start at the newest event
 	for {
-		firstEl = lastEl.Prev()
-		if firstEl == nil {
-			break
+		if cursorItem == nil {
+			t.list.PushFront(event)
+			return // prepend to back of list
 		}
-		first = firstEl.Value.(TT)
 
-		if event.GetModRev() > first.GetModRev() {
-			t.list.InsertAfter(event, firstEl)
-			return
+		cursorEvent := cursorItem.Value
+		if event.GetRevision() < cursorEvent.GetRevision() {
+			cursorItem = cursorItem.Prev()
+			continue // keep scanning back in time
 		}
-		lastEl = firstEl
+
+		t.list.InsertAfter(event, cursorItem)
+		return
 	}
 }
 
 func (t *TimeBuffer[T, TT]) trimUnlocked() {
-	item := t.list.Front()
+	item := t.list.First()
 	for {
-		if t.list.Len() <= t.maxLen || item == nil {
-			return
+		if t.list.Len <= t.len || item == nil {
+			break
 		}
-		event := item.Value.(TT)
-
+		event := item.Value
 		next := item.Next()
-		if t.upperBound > event.GetModRev() {
-			watchBufferLength.Dec()
+
+		// Trim if the buffer is too long
+		if t.max > event.GetRevision() {
+			timeBufferLength.Dec()
 			t.list.Remove(item)
 		}
+
+		// Keep track of the buffer's tail
 		if next != nil {
-			newFront := next.Value.(TT)
-			t.lowerBound = newFront.GetModRev()
+			t.min = next.Value.GetRevision()
 		}
 		item = next
 	}
 }
 
-func (t *TimeBuffer[T, TT]) Range(start int64, ivl T) ([]TT, int64, int64) {
+func (t *TimeBuffer[T, TT]) All() (slice []TT) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
+
+	item := t.list.First() // start at the oldest event
+	for {
+		if item == nil {
+			break
+		}
+		slice = append(slice, item.Value)
+		item = item.Next()
+	}
+	return
+}
+
+func (t *TimeBuffer[T, TT]) Range(start int64, query T) ([]TT, int64, int64) {
 	t.mut.Lock()
 	defer t.mut.Unlock()
 
 	slice := []TT{}
-	pos := t.list.Front()
+	item := t.list.First() // start at the oldest event
 	for {
-		if pos == nil {
+		if item == nil {
 			break
 		}
-		e := pos.Value.(TT)
-		if e.GetModRev() <= start {
-			pos = pos.Next()
+		event := item.Value
+		if event.GetRevision() <= start {
+			item = item.Next()
 			continue
 		}
-		if e.GetModRev() > t.upperBound {
+		if event.GetRevision() > t.max {
 			break
 		}
-		if e.InRange(ivl) {
-			slice = append(slice, e)
+		if event.Matches(query) {
+			slice = append(slice, event)
 		}
-		pos = pos.Next()
+		item = item.Next()
 	}
-	return slice, t.lowerBound, t.upperBound
+	return slice, t.min, t.max
 }
 
 func (t *TimeBuffer[T, TT]) bridgeGapUnlocked() {
-	val := t.upperVal
-	if val == nil {
-		val = t.list.Front()
+	item := t.cursor // start at the oldest visible event and scan forwards
+	if item == nil {
+		item = t.list.First()
 	}
 	for {
-		if val == nil || val.Value == nil {
-			break
+		if item == nil {
+			break // at end of list
 		}
-		valE := val.Value.(TT)
+		event := item.Value
 
-		if valE.GetModRev() <= t.upperBound {
-			val = val.Next()
-			continue // this gap has already been closed
+		// Not a gap - keep scanning
+		if event.GetRevision() <= t.max {
+			item = item.Next()
+			continue
 		}
 
-		isNextEvent := valE.GetModRev() == t.upperBound+1
-		age := valE.GetAge()
+		isNextEvent := event.GetRevision() == t.max+1
+		age := event.GetAge()
 		hasTimedout := age > t.gapTimeout
-		if hasTimedout && !isNextEvent {
-			zap.L().Warn("filled gap in watch stream", zap.Int64("from", t.upperBound), zap.Int64("to", valE.GetModRev()))
-			watchGapTimeoutCount.Inc()
+
+		// Report on gap timeouts
+		if !isNextEvent && hasTimedout {
+			zap.L().Warn("filled gap in event buffer", zap.Int64("from", t.max), zap.Int64("to", event.GetRevision()))
+			timeBufferTimeoutCount.Inc()
 		}
+
+		// We've reached a gap and it hasn't timed out yet
 		if !isNextEvent && !hasTimedout {
 			break
 		}
 
-		if t.ch != nil {
-			t.ch <- valE
-		}
-		t.upperBound = valE.GetModRev()
-		t.upperVal = val
-		if t.lowerBound == -1 {
-			t.lowerBound = valE.GetModRev()
-		}
-
-		currentWatchRev.Set(float64(t.upperBound))
-		watchLatency.Observe(age.Seconds())
-
-		val = val.Next()
+		t.advanceCursorUnlocked(item, event)
+		item = item.Next()
 		continue
 
 	}
 	t.trimUnlocked()
+}
+
+func (t *TimeBuffer[T, TT]) advanceCursorUnlocked(item *Element[TT], event TT) {
+	t.ch <- event
+	t.max = event.GetRevision()
+	t.cursor = item
+
+	if t.min == -1 {
+		t.min = event.GetRevision()
+	}
+
+	timeBufferVisibleMax.Set(float64(t.max))
 }

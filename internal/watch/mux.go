@@ -60,7 +60,7 @@ func (m *Mux) StartWatch(client *clientv3.Client) (*Status, error) {
 	}
 
 	nextEvent := (resp.Header.Revision + 1)
-	startRev := nextEvent - int64(m.buffer.MaxLen())
+	startRev := nextEvent - int64(m.buffer.Len())
 	if startRev < 0 {
 		startRev = 0
 	}
@@ -87,6 +87,7 @@ func (m *Mux) watchLoop(w clientv3.WatchChan) {
 
 		for _, event := range events {
 			zap.L().Info("observed watch event", zap.Int64("metaRev", meta))
+			watchEventCount.Inc()
 			m.buffer.Push(&eventWrapper{
 				Event:     event,
 				Timestamp: time.Now(),
@@ -164,5 +165,5 @@ type eventWrapper struct {
 }
 
 func (e *eventWrapper) GetAge() time.Duration         { return time.Since(e.Timestamp) }
-func (e *eventWrapper) GetModRev() int64              { return e.Kv.ModRevision }
-func (e *eventWrapper) InRange(ivl adt.Interval) bool { return ivl.Compare(&e.Key) == 0 }
+func (e *eventWrapper) GetRevision() int64            { return e.Kv.ModRevision }
+func (e *eventWrapper) Matches(ivl adt.Interval) bool { return ivl.Compare(&e.Key) == 0 }

@@ -66,13 +66,13 @@ func EventKeys(events []*mvccpb.Event) []string {
 }
 
 type TimestampedEvent interface {
-	GetModRev() int64
+	GetRevision() int64
 }
 
 func EventModRevs[T TimestampedEvent](events []T) []int64 {
 	ret := make([]int64, len(events))
 	for i, event := range events {
-		ret[i] = event.GetModRev()
+		ret[i] = event.GetRevision()
 	}
 	return ret
 }
