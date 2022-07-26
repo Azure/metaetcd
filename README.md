@@ -1,7 +1,5 @@
 # Meta Etcd
 
-> Project status: proof of concept - do not use unless you want an adventure!
-
 A proxy that enables sharding Kubernetes apiserver's keyspace across multiple etcd clusters.
 
 ## Why?
@@ -22,10 +20,6 @@ Beyond scaling bottlenecks, partitioning is still useful - particularly for syst
 - Multi-key range queries fan out to all clusters
 - Leases are only partially supported
 
-## Repartitioning
-
-Currently the proxy does not support repartitioning, although it is implemented such that it is possible in the future. The long term goal is to support dynamically adding/removing member clusters at runtime with little to no impact.
-
 ## Architecture
 
 ### Clocking
@@ -38,6 +32,28 @@ Since at least one member cluster always has the latest timestamp, the coordinat
 
 The proxy watches the entire keyspace of every member cluster, buffers n messages, and replays them to clients. It's possible that messages will be received out of order, since network latency may vary between member clusters. In this case, it will buffer the out of order message until a timeout window is exceeded or the previous message has been received.
 
+### Repartitioning
+
+Currently the proxy does not support repartitioning, although it is implemented such that it is possible in the future. The long term goal is to support dynamically adding/removing member clusters at runtime with little to no impact.
+
+## Basic Usage
+
+Required flags:
+
+- `--ca-cert` certificate used to verify the identity of etcd clusters (and proxy clients)
+- `--client-cert` certificate presented to etcd clusters
+- `--client-cert-key` key of `--client-cert`
+- `--coordinator` URL of the coordinator cluster
+- `--members` comma-separated list of member cluster URLs
+
+By default, the meta cluster's proxy will be served on localhost:2379.
+Although the listen address and server certificate can be configured with flags.
+
+Important metrics:
+
+- `metaetcd_request_count`: incremented for each request (by method)
+- `metaetcd_time_buffer_timeouts_count`: incremented when a watch event is considered to be lost
+- `metaetcd_clock_reconstitution`: incremented when the coordinator's state is lost and the clock is reconstituted from member clusters
 
 ## Contributing
 
