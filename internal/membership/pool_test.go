@@ -39,7 +39,7 @@ func TestPoolIntegration(t *testing.T) {
 	t.Run("get member for key happy path", func(t *testing.T) {
 		first := p.GetMemberForKey("anything")
 		second := p.GetMemberForKey("anything1")
-		assert.NotEqual(t, first, second)
+		assert.False(t, first == second)
 	})
 }
 

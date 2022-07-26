@@ -45,7 +45,11 @@ func (t *TimeBuffer[T, TT]) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.bridgeGapUnlocked()
+			func() {
+				t.mut.Lock()
+				defer t.mut.Unlock()
+				t.bridgeGapUnlocked()
+			}()
 		}
 	}
 }
