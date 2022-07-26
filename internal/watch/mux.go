@@ -2,7 +2,6 @@ package watch
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/coreos/etcd/clientv3"
@@ -50,9 +49,15 @@ func (m *Mux) Run(ctx context.Context) {
 
 func (m *Mux) StartWatch(ctx context.Context, client *clientv3.Client) (*Status, error) {
 	watchesDialing.Inc()
-	resp, err := client.KV.Get(ctx, "a") // any key will do - doesn't need to exist
-	if err != nil {
-		return nil, fmt.Errorf("getting current revision: %w", err)
+
+	var currentRev int64
+	for {
+		var ok bool
+		currentRev, ok = getCurrentRevisionEventually(ctx, client)
+		if ok {
+			break
+		}
+		time.Sleep(time.Second)
 	}
 
 	// Don't use the provided context. It's for establishing a connection - this one is for running it.
@@ -63,7 +68,7 @@ func (m *Mux) StartWatch(ctx context.Context, client *clientv3.Client) (*Status,
 	}
 
 	// Warm the buffer by starting the watch at (current revision) - (buffer length)
-	nextEvent := (resp.Header.Revision + 1)
+	nextEvent := (currentRev + 1)
 	startRev := nextEvent - int64(m.buffer.Len())
 	if startRev < 0 {
 		startRev = 0
@@ -164,3 +169,16 @@ type eventWrapper struct {
 func (e *eventWrapper) GetAge() time.Duration         { return time.Since(e.Timestamp) }
 func (e *eventWrapper) GetRevision() int64            { return e.Kv.ModRevision }
 func (e *eventWrapper) Matches(ivl adt.Interval) bool { return ivl.Compare(&e.Key) == 0 }
+
+func getCurrentRevisionEventually(ctx context.Context, client *clientv3.Client) (int64, bool) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+
+	resp, err := client.KV.Get(ctx, "a") // any key will do - doesn't need to exist
+	if err == nil {
+		return resp.Header.Revision, true
+	}
+
+	zap.L().Error("unable to get current revision from member when initializing watch", zap.Strings("memberEndpoints", client.Endpoints()), zap.Error(err))
+	return 0, false
+}
