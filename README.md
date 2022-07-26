@@ -36,6 +36,11 @@ The proxy watches the entire keyspace of every member cluster, buffers n message
 
 Currently the proxy does not support repartitioning, although it is implemented such that it is possible in the future. The long term goal is to support dynamically adding/removing member clusters at runtime with little to no impact.
 
+## Overhead
+
+The metaetcd proxy typically consumes about 50% of the sum of each member cluster's CPU. Memory usage is low.
+A three node etcd coordinator cluster backed by tmpfs adds roughly the same overhead as the proxy.
+
 ## Basic Usage
 
 Required flags:
